@@ -6,6 +6,7 @@ const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
 
+const IS_WIN = process.platform === 'win32';
 const PORT = Number(process.env.PORT || 17891);
 const MODEL = process.env.CODEX_MODEL || ''; // 비우면 codex 기본 모델 사용
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 3);
@@ -47,12 +48,15 @@ ${JSON.stringify(input)}`;
 function runCodex(prompt) {
   return new Promise((resolve, reject) => {
     const outFile = path.join(WORKDIR, `out-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
+    // Windows는 codex가 .cmd 래퍼라 shell이 필요하고 경로를 직접 따옴표로 감싸야 함.
+    // Linux/macOS는 shell 없이 인자 배열로 그대로 전달.
+    const q = IS_WIN ? (s) => `"${s}"` : (s) => s;
     const args = ['exec', '-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never',
-      '-C', `"${WORKDIR}"`, '-o', `"${outFile}"`,
+      '-C', q(WORKDIR), '-o', q(outFile),
       '-c', `model_reasoning_effort="${process.env.CODEX_EFFORT || 'low'}"`];
     if (MODEL) args.push('-m', MODEL);
     args.push('-');
-    const child = spawn('codex', args, { shell: true, windowsHide: true, cwd: WORKDIR });
+    const child = spawn(process.env.CODEX_BIN || 'codex', args, { shell: IS_WIN, windowsHide: true, cwd: WORKDIR });
     let stderr = '';
     let done = false;
     const timer = setTimeout(() => {
@@ -115,7 +119,27 @@ async function translate(body) {
 const CACHE_DIR = path.join(__dirname, 'cache');
 const TRANSCRIPT_DIR = path.join(CACHE_DIR, 'transcripts');
 fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-const PYTHON = path.join(__dirname, '.venv', 'Scripts', 'python.exe');
+const PYTHON = IS_WIN
+  ? path.join(__dirname, '.venv', 'Scripts', 'python.exe')
+  : path.join(__dirname, '.venv', 'bin', 'python');
+
+// Linux: pip로 설치한 CUDA 라이브러리(cuBLAS/cuDNN)는 LD_LIBRARY_PATH로 알려줘야 로드됨
+function cudaLibPaths() {
+  if (IS_WIN) return [];
+  const out = [];
+  const libRoot = path.join(__dirname, '.venv', 'lib');
+  try {
+    for (const py of fs.readdirSync(libRoot)) {
+      const nv = path.join(libRoot, py, 'site-packages', 'nvidia');
+      if (!fs.existsSync(nv)) continue;
+      for (const pkg of fs.readdirSync(nv)) {
+        const lib = path.join(nv, pkg, 'lib');
+        if (fs.existsSync(lib)) out.push(lib);
+      }
+    }
+  } catch (_) {}
+  return out;
+}
 const sttJobs = new Map(); // videoId -> { cues:[], state, msg, lang, touched }
 let sttProc = null;
 let sttBuf = '';
@@ -126,7 +150,11 @@ function ensureSttWorker() {
   sttProc = spawn(PYTHON, [path.join(__dirname, 'stt_worker.py')], {
     cwd: __dirname,
     windowsHide: true,
-    env: { ...process.env, PYTHONIOENCODING: 'utf-8' },
+    env: {
+      ...process.env,
+      PYTHONIOENCODING: 'utf-8',
+      LD_LIBRARY_PATH: [...cudaLibPaths(), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+    },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
   sttProc.stdout.setEncoding('utf8');
@@ -200,7 +228,7 @@ function sttStart(videoId, from) {
   if (job.state === 'done') return job;
   if (!ensureSttWorker()) {
     job.state = 'error';
-    job.msg = 'STT 환경이 설치되지 않았습니다 (host\\.venv 없음)';
+    job.msg = 'STT 환경이 설치되지 않았습니다 (host/.venv 없음 — setup 스크립트를 실행하세요)';
     return job;
   }
   if (job.state === 'error') { job.state = 'queued'; job.msg = ''; }

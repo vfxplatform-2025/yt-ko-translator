@@ -12,6 +12,23 @@
 2. `chrome://extensions` → 개발자 모드 → "압축해제된 확장 프로그램 로드" → `extension` 폴더
 3. 유튜브 영상을 열면 자동으로 동작. 팝업에서 켜기/끄기, 원문 병기, 글자 크기, 음성 인식 사용 여부 설정
 
+## Rocky Linux 9 (Linux)에서 사용
+호스트와 Chrome이 **같은 서버**에서 돌아가는 구성을 기준으로 합니다 (예: DCV 원격 데스크톱 안의 Chrome).
+1. Node 18+ 와 codex CLI 설치 후 `codex login` (ChatGPT 로그인)
+   ```bash
+   sudo dnf module enable -y nodejs:20 && sudo dnf install -y nodejs
+   sudo npm install -g @openai/codex
+   codex login
+   ```
+2. 최초 1회: `cd host && chmod +x setup.sh start.sh && ./setup.sh`
+   - `uv`로 `host/.venv`(Python 3.12)를 만들고 yt-dlp, faster-whisper 등을 설치합니다.
+   - NVIDIA GPU가 있으면 CUDA 라이브러리까지 설치하고, **없으면 CPU 모드**(모델 `small`, int8)로 동작합니다.
+3. 실행: `./start.sh`
+4. 서버의 Chrome에서 `chrome://extensions` → 개발자 모드 → `extension` 폴더 로드
+- GPU 없는 CPU 서버: 자막이 있는 영상은 영향이 없고, 자막 없는 영상의 받아쓰기만 느려집니다 (코어 수에 따라 재생 속도의 1~5배 수준).
+  `WHISPER_CPU_MODEL=base` 로 더 가볍게, `medium` 으로 더 정확하게 바꿀 수 있습니다.
+- Windows PC의 Chrome에서 원격 Rocky 서버의 호스트를 쓰는 구성은 지원하지 않습니다 (호스트는 127.0.0.1에만 열림).
+
 ## 동작
 - 유튜브 자막이 있으면 그것을 번역 (STT 없음)
 - 자막이 없으면 오디오를 받아 재생 속도의 수십 배로 받아쓰기 → 번역
@@ -20,7 +37,8 @@
 
 ## 환경변수 (host 실행 전에 설정)
 - `CODEX_MODEL` 번역 모델 (기본: codex 기본값), `CODEX_EFFORT` 추론 강도 (기본 low)
-- `WHISPER_MODEL` 음성 인식 모델 (기본 large-v3-turbo)
+- `WHISPER_MODEL` GPU용 음성 인식 모델 (기본 large-v3-turbo), `WHISPER_CPU_MODEL` CPU용 (기본 small)
+- `CODEX_BIN` codex 실행 파일 경로 (PATH에 없을 때)
 - `MAX_CONCURRENT` 동시 번역 수 (기본 3)
 
 ## 문제 해결

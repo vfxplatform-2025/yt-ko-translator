@@ -22,7 +22,7 @@ chrome.runtime.sendMessage({ type: 'health' }, (r) => {
     el.textContent = r.stt ? '번역 호스트 연결됨 (음성 인식 사용 가능)' : '번역 호스트 연결됨 (음성 인식 미설치)';
     el.classList.add('ok');
   } else {
-    el.textContent = '호스트 꺼짐 — host\\start.bat 실행 필요';
+    el.textContent = '호스트 꺼짐 — start.bat / start.sh 실행 필요';
     el.classList.add('bad');
   }
 });

@@ -184,7 +184,7 @@
       const r = await send({ type: 'stt-start', videoId, from });
       if (st !== s) return;
       if (!r.ok) {
-        s.fatal = r.unreachable ? '번역 호스트에 연결할 수 없습니다. host\\start.bat 을 실행하세요' : `음성 인식 오류: ${r.error}`;
+        s.fatal = r.unreachable ? '번역 호스트에 연결할 수 없습니다. host의 start.bat(Windows) 또는 start.sh(Linux)를 실행하세요' : `음성 인식 오류: ${r.error}`;
         showStatus(s.fatal, true);
         return;
       }
@@ -320,7 +320,7 @@
       batch.forEach(failCue);
       if (res && res.unreachable) {
         s.blockedUntil = Date.now() + 8000;
-        s.hostErr = '번역 호스트에 연결할 수 없습니다. host\\start.bat 을 실행하세요';
+        s.hostErr = '번역 호스트에 연결할 수 없습니다. host의 start.bat(Windows) 또는 start.sh(Linux)를 실행하세요';
       } else {
         s.blockedUntil = Date.now() + 3000;
         s.hostErr = `번역 오류: ${res && res.error}`;

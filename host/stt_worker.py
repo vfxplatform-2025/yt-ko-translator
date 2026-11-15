@@ -41,6 +41,7 @@ sys.stdout.reconfigure(encoding="utf-8")
 sys.stdin.reconfigure(encoding="utf-8")
 
 MODEL_NAME = os.environ.get("WHISPER_MODEL", "large-v3-turbo")
+CPU_MODEL_NAME = os.environ.get("WHISPER_CPU_MODEL", "small")
 _out_lock = threading.Lock()
 
 
@@ -64,14 +65,20 @@ def get_model(force_cpu=False):
     global _model, _model_device
     if _model is not None and not (force_cpu and _model_device != "cpu"):
         return _model
-    if not force_cpu:
+    import ctranslate2
+
+    if not force_cpu and ctranslate2.get_cuda_device_count() > 0:
         try:
             _model = WhisperModel(MODEL_NAME, device="cuda", compute_type="float16")
             _model_device = "cuda"
             return _model
         except Exception as e:  # noqa: BLE001
             log("CUDA 로드 실패, CPU로 대체:", e)
-    _model = WhisperModel(MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=8)
+    else:
+        log("CUDA 장치 없음 -> CPU 사용")
+    # CPU에서는 큰 모델이 너무 느려서 작은 모델 사용 (WHISPER_CPU_MODEL 로 변경 가능)
+    threads = int(os.environ.get("WHISPER_CPU_THREADS", str(os.cpu_count() or 4)))
+    _model = WhisperModel(CPU_MODEL_NAME, device="cpu", compute_type="int8", cpu_threads=threads)
     _model_device = "cpu"
     return _model
 
@@ -100,9 +107,13 @@ def download_audio(vid):
         "https://www.youtube.com/watch?v=" + vid,
     ]
     # stdin을 워커의 파이프와 분리 (물려받으면 하위 프로세스가 명령 스트림을 읽으며 멈출 수 있음)
-    r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
-                       stdin=subprocess.DEVNULL, timeout=600)
-    path = find_audio(vid)
+    for attempt in range(3):  # 유튜브가 가끔 일시적으로 403을 주므로 재시도
+        r = subprocess.run(cmd, capture_output=True, text=True, encoding="utf-8", errors="replace",
+                           stdin=subprocess.DEVNULL, timeout=600)
+        path = find_audio(vid)
+        if r.returncode == 0 and path:
+            break
+        time.sleep(3 * (attempt + 1))
     if r.returncode != 0 or not path:
         raise RuntimeError("오디오 다운로드 실패: " + (r.stderr or r.stdout).strip()[-400:])
     return path
