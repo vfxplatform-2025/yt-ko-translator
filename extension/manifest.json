@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "YouTube 한글 자막 번역 (개인용)",
+  "version": "0.1.0",
+  "description": "유튜브 자막을 로컬 codex CLI로 자연스러운 한국어로 번역해 오버레이로 보여줍니다.",
+  "permissions": ["storage", "unlimitedStorage"],
+  "host_permissions": ["https://www.youtube.com/*", "http://127.0.0.1:17891/*"],
+  "background": { "service_worker": "background.js" },
+  "action": { "default_title": "YouTube 한글 자막", "default_popup": "popup.html" },
+  "content_scripts": [
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["inject.js"],
+      "run_at": "document_start",
+      "world": "MAIN"
+    },
+    {
+      "matches": ["https://www.youtube.com/*"],
+      "js": ["content.js"],
+      "css": ["overlay.css"],
+      "run_at": "document_idle"
+    }
+  ]
+}

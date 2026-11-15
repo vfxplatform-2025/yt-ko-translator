@@ -1,0 +1,21 @@
+<!doctype html>
+<html lang="ko">
+<head>
+<meta charset="utf-8">
+<style>
+  body { width: 260px; margin: 0; padding: 14px; font: 13px "Malgun Gothic", sans-serif; color: #222; }
+  label { display: flex; align-items: center; justify-content: space-between; margin: 10px 0; }
+  .st { font-size: 12px; padding: 6px 8px; border-radius: 4px; background: #eee; }
+  .st.ok { background: #dff3e1; } .st.bad { background: #f8dcdc; }
+  input[type=range] { width: 120px; }
+</style>
+</head>
+<body>
+  <div id="host" class="st">호스트 확인 중…</div>
+  <label>번역 사용 <input type="checkbox" id="enabled"></label>
+  <label>자막 없으면 음성 인식 <input type="checkbox" id="sttEnabled"></label>
+  <label>원문도 표시 <input type="checkbox" id="showOriginal"></label>
+  <label>글자 크기 <span><input type="range" id="fontSize" min="16" max="48" step="1"> <span id="fsv"></span></span></label>
+  <script src="popup.js"></script>
+</body>
+</html>
