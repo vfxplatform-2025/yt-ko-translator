@@ -65,17 +65,29 @@ ${JSON.stringify(input)}`;
 const codex = new CodexSession({ bin: CODEX_BIN, cwd: WORKDIR, model: MODEL, effort: EFFORT, log: (...a) => console.log(...a) });
 const holders = new Map(); // holder id -> 마지막 신호 시각
 const HOLDER_TTL_MS = 3 * 60 * 1000; // 확장 프로그램은 1분마다 ping
+
+// 번역 버튼을 켠 탭이 하나도 없으면 codex 와 음성 인식 워커(GPU 메모리)를 함께 내림.
+// 중단된 받아쓰기 작업은 error 상태가 되고, 다시 켜면 startStt 가 재시작함.
+function releaseIfIdle() {
+  if (holders.size) return;
+  codex.stop();
+  for (const [engine, p] of sttProcs) {
+    console.log(`[stt:${engine}] 번역이 모두 꺼져 워커를 종료합니다`);
+    try { p.kill(); } catch (_) {}
+  }
+}
+
 setInterval(() => {
   const now = Date.now();
   for (const [id, at] of holders) if (now - at > HOLDER_TTL_MS) holders.delete(id);
-  if (!holders.size) codex.stop();
+  releaseIfIdle();
 }, 30000).unref();
 
 async function session(action, id) {
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) throw new Error('bad id');
   if (action === 'stop') {
     holders.delete(id);
-    if (!holders.size) codex.stop();
+    releaseIfIdle();
     return;
   }
   if (action !== 'start' && action !== 'ping') throw new Error('bad action');
