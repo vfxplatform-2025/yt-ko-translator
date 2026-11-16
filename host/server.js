@@ -1,14 +1,18 @@
-// 로컬 번역 호스트: 확장 프로그램 -> (127.0.0.1) -> codex exec (ChatGPT 로그인 세션) -> 한국어 번역
+// 로컬 번역 호스트: 확장 프로그램 -> (127.0.0.1) -> codex (ChatGPT 로그인 세션) -> 번역
+// 플레이어의 번역 버튼이 켜져 있는 동안은 상주 codex(app-server)를, 그 외에는 요청마다 codex exec 를 사용.
 // 실행: node server.js   (의존성 없음)
 const http = require('http');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
+const { CodexSession } = require('./codex_session');
 
 const IS_WIN = process.platform === 'win32';
 const PORT = Number(process.env.PORT || 17891);
 const MODEL = process.env.CODEX_MODEL || ''; // 비우면 codex 기본 모델 사용
+const EFFORT = process.env.CODEX_EFFORT || 'low'; // none 이 약 20% 빠르지만 번역 품질은 low 가 나음
+const CODEX_BIN = process.env.CODEX_BIN || 'codex';
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 3);
 const TIMEOUT_MS = 120000;
 const WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-ko-'));
@@ -26,18 +30,29 @@ function release() {
   if (next) next();
 }
 
-function buildPrompt({ title, channel, lines, context }) {
+// 언어 코드 -> 이름 (예: 'en' -> '영어', 'zh-Hans' -> '중국어(간체)')
+const LANG_RE = /^[A-Za-z]{2,3}(-[A-Za-z0-9]{2,8})*$/;
+const langNames = new Intl.DisplayNames(['ko'], { type: 'language' });
+function langName(code) {
+  try { return langNames.of(code) || code; } catch (_) { return code; }
+}
+
+function buildPrompt({ title, channel, lines, context, sourceLang, targetLang }) {
   const input = lines.map((l) => ({ i: l.i, t: l.t }));
-  return `당신은 유튜브 영상 자막 번역가입니다. 아래 자막 줄들을 자연스러운 한국어 구어체로 번역하세요.
+  const target = LANG_RE.test(targetLang || '') ? targetLang : 'ko';
+  const tName = langName(target);
+  const srcLine = LANG_RE.test(sourceLang || '') ? `원문 언어: ${langName(sourceLang)}\n` : '';
+  return `당신은 유튜브 영상 자막 번역가입니다. 아래 자막 줄들을 자연스러운 ${tName} 구어체로 번역하세요.
 
 규칙:
-- 직역하지 말고, 한국어 화자가 실제로 말하는 것처럼 자연스럽게 의역합니다.
+- 직역하지 말고, ${tName} 원어민이 실제로 말하는 것처럼 자연스럽게 의역합니다.
 - 각 줄은 자막 한 줄이므로 짧고 읽기 쉽게 유지합니다. 한 줄이 문장 중간에서 끊겨 있어도 앞뒤 줄의 문맥을 보고 자연스럽게 이어지게 번역합니다.
-- 고유명사, 브랜드, 기술 용어는 한국에서 통용되는 표기를 쓰고, 통용 표기가 없으면 원문을 그대로 둡니다.
+- 고유명사, 브랜드, 기술 용어는 ${tName} 사용자들 사이에서 통용되는 표기를 쓰고, 통용 표기가 없으면 원문을 그대로 둡니다.
 - 입력 줄 수와 출력 줄 수는 반드시 같아야 하며, 각 i 값을 그대로 유지합니다.
 - 설명, 코드블록, 머리말 없이 JSON 배열만 출력합니다. 형식: [{"i":0,"t":"번역문"}, ...]
 - 파일을 읽거나 명령을 실행하지 마세요. 오직 번역만 하세요.
 
+${srcLine}번역 언어: ${tName}
 영상 제목: ${title || '(알 수 없음)'}
 채널: ${channel || '(알 수 없음)'}
 ${context ? `\n직전 문맥(참고용, 번역하지 않음):\n${context}\n` : ''}
@@ -45,7 +60,34 @@ ${context ? `\n직전 문맥(참고용, 번역하지 않음):\n${context}\n` : '
 ${JSON.stringify(input)}`;
 }
 
+// ---------------- 상주 codex 세션 ----------------
+// 번역 버튼을 켠 탭(holder)이 하나라도 있으면 유지. 끄기 요청이 없더라도(탭 닫힘 등) 신호가 끊기면 자동 종료.
+const codex = new CodexSession({ bin: CODEX_BIN, cwd: WORKDIR, model: MODEL, effort: EFFORT, log: (...a) => console.log(...a) });
+const holders = new Map(); // holder id -> 마지막 신호 시각
+const HOLDER_TTL_MS = 3 * 60 * 1000; // 확장 프로그램은 1분마다 ping
+setInterval(() => {
+  const now = Date.now();
+  for (const [id, at] of holders) if (now - at > HOLDER_TTL_MS) holders.delete(id);
+  if (!holders.size) codex.stop();
+}, 30000).unref();
+
+async function session(action, id) {
+  if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) throw new Error('bad id');
+  if (action === 'stop') {
+    holders.delete(id);
+    if (!holders.size) codex.stop();
+    return;
+  }
+  if (action !== 'start' && action !== 'ping') throw new Error('bad action');
+  holders.set(id, Date.now());
+  if (action === 'start') await codex.start(); // 미리 띄워 두어 첫 번역부터 빠르게
+}
+
 function runCodex(prompt) {
+  return codex.running ? codex.ask(prompt, TIMEOUT_MS) : runCodexExec(prompt);
+}
+
+function runCodexExec(prompt) {
   return new Promise((resolve, reject) => {
     const outFile = path.join(WORKDIR, `out-${Date.now()}-${Math.random().toString(36).slice(2)}.txt`);
     // Windows는 codex가 .cmd 래퍼라 shell이 필요하고 경로를 직접 따옴표로 감싸야 함.
@@ -53,10 +95,10 @@ function runCodex(prompt) {
     const q = IS_WIN ? (s) => `"${s}"` : (s) => s;
     const args = ['exec', '-s', 'read-only', '--skip-git-repo-check', '--ephemeral', '--color', 'never',
       '-C', q(WORKDIR), '-o', q(outFile),
-      '-c', `model_reasoning_effort="${process.env.CODEX_EFFORT || 'low'}"`];
+      '-c', `model_reasoning_effort="${EFFORT}"`];
     if (MODEL) args.push('-m', MODEL);
     args.push('-');
-    const child = spawn(process.env.CODEX_BIN || 'codex', args, { shell: IS_WIN, windowsHide: true, cwd: WORKDIR });
+    const child = spawn(CODEX_BIN, args, { shell: IS_WIN, windowsHide: true, cwd: WORKDIR });
     let stderr = '';
     let done = false;
     const timer = setTimeout(() => {
@@ -115,19 +157,27 @@ async function translate(body) {
   }
 }
 
-// ---------------- STT (자막 없는 영상): yt-dlp + faster-whisper 워커 ----------------
+// ---------------- STT (자막 없는 영상): yt-dlp + 음성 인식 엔진 워커 ----------------
 const CACHE_DIR = path.join(__dirname, 'cache');
 const TRANSCRIPT_DIR = path.join(CACHE_DIR, 'transcripts');
 fs.mkdirSync(TRANSCRIPT_DIR, { recursive: true });
-const PYTHON = IS_WIN
-  ? path.join(__dirname, '.venv', 'Scripts', 'python.exe')
-  : path.join(__dirname, '.venv', 'bin', 'python');
+
+// 음성 인식 엔진: 엔진마다 자기 가상환경의 Python 으로 같은 stt_worker.py 를 실행 (STT_ENGINE 으로 구분)
+const venvPython = (dir) => (IS_WIN ? path.join(dir, 'Scripts', 'python.exe') : path.join(dir, 'bin', 'python'));
+const ENGINES = {
+  whisper: path.join(__dirname, '.venv'), // faster-whisper (다국어)
+  haas: path.join(__dirname, 'engines', 'Haas-ASR', '.venv'), // Haas-ja (일본어, 그 외 언어는 같은 환경의 Whisper)
+  qwen: path.join(__dirname, 'engines', 'qwen', '.venv'), // Qwen3-ASR 1.7B (다국어)
+  nemotron: path.join(__dirname, 'engines', 'nemotron', '.venv'), // Nemotron 3.5 ASR Streaming 0.6B (다국어)
+};
+const engineReady = (engine) => !!ENGINES[engine] && fs.existsSync(venvPython(ENGINES[engine]));
+const readyEngines = () => Object.fromEntries(Object.keys(ENGINES).map((e) => [e, engineReady(e)]));
 
 // Linux: pip로 설치한 CUDA 라이브러리(cuBLAS/cuDNN)는 LD_LIBRARY_PATH로 알려줘야 로드됨
-function cudaLibPaths() {
+function cudaLibPaths(venv) {
   if (IS_WIN) return [];
   const out = [];
-  const libRoot = path.join(__dirname, '.venv', 'lib');
+  const libRoot = path.join(venv, 'lib');
   try {
     for (const py of fs.readdirSync(libRoot)) {
       const nv = path.join(libRoot, py, 'site-packages', 'nvidia');
@@ -140,49 +190,60 @@ function cudaLibPaths() {
   } catch (_) {}
   return out;
 }
-const sttJobs = new Map(); // videoId -> { cues:[], state, msg, lang, touched }
-let sttProc = null;
-let sttBuf = '';
 
-function ensureSttWorker() {
-  if (sttProc) return true;
-  if (!fs.existsSync(PYTHON)) return false;
-  sttProc = spawn(PYTHON, [path.join(__dirname, 'stt_worker.py')], {
+// 받아쓰기 작업: 영상 + 요청 언어('' = 자동 감지) + 엔진 단위
+// jobKey -> { cues:[], seen, state, msg, prog, detected(감지된 언어), used(실제 쓴 엔진), lang, engine, touched }
+const sttJobs = new Map();
+const jobKey = (videoId, lang, engine) => `${videoId}|${lang || ''}|${engine}`;
+const STT_LANG_RE = /^[a-z]{2,3}$/; // 언어 기본 코드 (예: 'en', 'ja', 'zh')
+const sttProcs = new Map(); // engine -> 워커 프로세스
+
+// 엔진 워커 실행. 다른 엔진 워커는 GPU 메모리를 비우려고 종료 (엔진을 바꾸면 이전 작업은 끝남)
+function ensureSttWorker(engine) {
+  if (sttProcs.has(engine)) return true;
+  if (!engineReady(engine)) return false;
+  for (const [other, p] of sttProcs) if (other !== engine) p.kill();
+  const venv = ENGINES[engine];
+  const proc = spawn(venvPython(venv), [path.join(__dirname, 'stt_worker.py')], {
     cwd: __dirname,
     windowsHide: true,
     env: {
       ...process.env,
+      STT_ENGINE: engine,
       PYTHONIOENCODING: 'utf-8',
-      LD_LIBRARY_PATH: [...cudaLibPaths(), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
+      LD_LIBRARY_PATH: [...cudaLibPaths(venv), process.env.LD_LIBRARY_PATH].filter(Boolean).join(':'),
     },
     stdio: ['pipe', 'pipe', 'pipe'],
   });
-  sttProc.stdout.setEncoding('utf8');
-  sttProc.stdout.on('data', (chunk) => {
-    sttBuf += chunk;
+  sttProcs.set(engine, proc);
+  let buf = '';
+  proc.stdout.setEncoding('utf8');
+  proc.stdout.on('data', (chunk) => {
+    buf += chunk;
     let nl;
-    while ((nl = sttBuf.indexOf('\n')) >= 0) {
-      const line = sttBuf.slice(0, nl).trim();
-      sttBuf = sttBuf.slice(nl + 1);
+    while ((nl = buf.indexOf('\n')) >= 0) {
+      const line = buf.slice(0, nl).trim();
+      buf = buf.slice(nl + 1);
       if (!line) continue;
-      try { onSttEvent(JSON.parse(line)); } catch (_) {}
+      try { onSttEvent(JSON.parse(line), engine); } catch (_) {}
     }
   });
-  sttProc.stderr.setEncoding('utf8');
-  sttProc.stderr.on('data', (d) => process.stderr.write(`[stt] ${d}`));
-  sttProc.on('exit', (code) => {
-    console.error(`[stt] 워커 종료 (code ${code})`);
+  proc.stderr.setEncoding('utf8');
+  proc.stderr.on('data', (d) => process.stderr.write(`[stt:${engine}] ${d}`));
+  proc.on('exit', (code) => {
+    console.error(`[stt:${engine}] 워커 종료 (code ${code})`);
+    if (sttProcs.get(engine) === proc) sttProcs.delete(engine);
     for (const j of sttJobs.values()) {
-      if (j.state !== 'done') { j.state = 'error'; j.msg = 'STT 워커가 종료되었습니다'; }
+      if (j.engine === engine && j.state !== 'done') { j.state = 'error'; j.msg = 'STT 워커가 종료되었습니다'; }
     }
-    sttProc = null;
   });
   return true;
 }
 
-function onSttEvent(ev) {
-  const job = sttJobs.get(ev.videoId);
+function onSttEvent(ev, engine) {
+  const job = sttJobs.get(jobKey(ev.videoId, ev.req, engine)); // 워커는 이벤트마다 요청 언어(req)를 붙임
   if (!job) return;
+  if (ev.used) job.used = ev.used;
   if (ev.ev === 'cues') {
     const seen = job.seen;
     for (const c of ev.cues) {
@@ -191,49 +252,73 @@ function onSttEvent(ev) {
       seen.add(key);
       job.cues.push(c);
     }
-    job.lang = ev.lang || job.lang;
+    job.detected = ev.lang || job.detected;
   } else if (ev.ev === 'status') {
     job.state = ev.state;
     job.msg = ev.msg;
+    job.prog = typeof ev.prog === 'number' ? ev.prog : null;
     if (ev.state === 'done') {
       try {
         const sorted = [...job.cues].sort((a, b) => a.s - b.s);
-        fs.writeFileSync(path.join(TRANSCRIPT_DIR, `${ev.videoId}.json`), JSON.stringify({ lang: job.lang, cues: sorted }));
+        fs.writeFileSync(transcriptFile(ev.videoId, job.lang, engine), JSON.stringify({ lang: job.detected, used: job.used, cues: sorted }));
       } catch (_) {}
     }
   }
 }
 
-function sttStart(videoId, from) {
+// 받아쓰기 캐시: <id>.<엔진>.<언어 또는 auto>.json
+const transcriptFile = (videoId, lang, engine) => path.join(TRANSCRIPT_DIR, `${videoId}.${engine}.${lang || 'auto'}.json`);
+
+// lang: '' 이면 자동 감지, 아니면 언어 코드(예: 'en', 'ja')로 고정
+function sttStart(videoId, from, lang = '', engine = 'whisper') {
   if (!/^[A-Za-z0-9_-]{6,20}$/.test(videoId)) throw new Error('bad videoId');
-  let job = sttJobs.get(videoId);
+  if (lang && !STT_LANG_RE.test(lang)) throw new Error('bad lang');
+  if (!ENGINES[engine]) throw new Error('bad engine');
+  // 이 PC에 없는 엔진이면 Whisper 로 대신 (예: Windows 에는 Whisper 만 설치)
+  if (!engineReady(engine) && engine !== 'whisper' && engineReady('whisper')) engine = 'whisper';
+  const key = jobKey(videoId, lang, engine);
+  let job = sttJobs.get(key);
   if (!job) {
-    const file = path.join(TRANSCRIPT_DIR, `${videoId}.json`);
-    job = { cues: [], seen: new Set(), state: 'queued', msg: '', lang: '', touched: Date.now() };
+    const file = transcriptFile(videoId, lang, engine);
+    job = { cues: [], seen: new Set(), state: 'queued', msg: '', prog: null, detected: '', used: '', lang, engine, touched: Date.now() };
     if (fs.existsSync(file)) {
       try {
         const saved = JSON.parse(fs.readFileSync(file, 'utf8'));
-        job.cues = saved.cues;
-        job.lang = saved.lang;
-        job.state = 'done';
-        job.msg = '캐시';
-        sttJobs.set(videoId, job);
+        Object.assign(job, { cues: saved.cues, detected: saved.lang, used: saved.used || engine, state: 'done', msg: '캐시', prog: 1 });
+        sttJobs.set(key, job);
         return job;
       } catch (_) {}
     }
-    sttJobs.set(videoId, job);
+    sttJobs.set(key, job);
     if (sttJobs.size > 8) sttJobs.delete(sttJobs.keys().next().value);
   }
   job.touched = Date.now();
   if (job.state === 'done') return job;
-  if (!ensureSttWorker()) {
+  if (!ensureSttWorker(engine)) {
     job.state = 'error';
-    job.msg = 'STT 환경이 설치되지 않았습니다 (host/.venv 없음 — setup 스크립트를 실행하세요)';
+    job.msg = engine === 'whisper'
+      ? 'STT 환경이 설치되지 않았습니다 (host/.venv 없음 — setup 스크립트를 실행하세요)'
+      : `음성 인식 엔진(${engine})이 설치되지 않았습니다 — 팝업에서 다른 모델을 고르세요`;
     return job;
   }
   if (job.state === 'error') { job.state = 'queued'; job.msg = ''; }
-  sttProc.stdin.write(JSON.stringify({ cmd: 'start', videoId, from: Number(from) || 0 }) + '\n');
+  sttProcs.get(engine).stdin.write(JSON.stringify({ cmd: 'start', videoId, from: Number(from) || 0, lang }) + '\n');
   return job;
+}
+
+// POST 본문(JSON) 읽기. limit 바이트를 넘으면 연결을 끊음
+function readJson(req, limit) {
+  return new Promise((resolve, reject) => {
+    let raw = '';
+    req.on('data', (d) => {
+      raw += d;
+      if (raw.length > limit) req.destroy();
+    });
+    req.on('end', () => {
+      try { resolve(JSON.parse(raw)); } catch (e) { reject(Object.assign(e, { status: 400 })); }
+    });
+    req.on('error', reject);
+  });
 }
 
 function send(res, status, obj) {
@@ -243,75 +328,88 @@ function send(res, status, obj) {
 }
 
 const server = http.createServer((req, res) => {
-  // 보안: 확장 프로그램에서 온 요청만 허용 (웹페이지는 Origin을 위조할 수 없음) + DNS rebinding 방지
+  // 보안: DNS rebinding 방지 + 확장 프로그램 요청만 허용.
+  // 확장 프로그램(background.js)은 모든 요청에 X-YTKO 헤더를 붙인다. 웹페이지가 이 헤더를 붙이면
+  // 브라우저가 먼저 CORS 사전 요청(OPTIONS, 헤더 없음)을 보내는데 그것이 여기서 거부되므로 위조할 수 없음.
   const host = (req.headers.host || '').toLowerCase();
   if (host !== `127.0.0.1:${PORT}` && host !== `localhost:${PORT}`) return send(res, 403, { error: 'bad host' });
   const origin = req.headers.origin || '';
-  if (!origin.startsWith('chrome-extension://') && process.env.ALLOW_ANY_ORIGIN !== '1') {
+  const fromExt = req.headers['x-ytko'] === '1' && (!origin || origin.startsWith('chrome-extension://'));
+  if (!fromExt && process.env.ALLOW_ANY_ORIGIN !== '1') {
+    console.warn(`[거부] ${req.method} ${req.url} origin=${origin || '(없음)'}`);
     return send(res, 403, { error: 'forbidden origin' });
   }
-  if (req.method === 'OPTIONS') {
-    res.writeHead(204, {
-      'Access-Control-Allow-Origin': origin,
-      'Access-Control-Allow-Methods': 'POST, GET, OPTIONS',
-      'Access-Control-Allow-Headers': 'Content-Type',
-    });
-    return res.end();
-  }
-  if (req.method === 'GET' && req.url === '/health') return send(res, 200, { ok: true, stt: fs.existsSync(PYTHON) });
-  if (req.method === 'POST' && req.url === '/stt/start') {
-    let raw = '';
-    req.on('data', (d) => { raw += d; if (raw.length > 1e5) req.destroy(); });
-    req.on('end', () => {
-      try {
-        const b = JSON.parse(raw);
-        const job = sttStart(String(b.videoId || ''), b.from);
-        send(res, 200, { state: job.state, msg: job.msg });
-      } catch (e) {
-        send(res, 400, { error: e.message });
-      }
-    });
-    return;
+  if (req.method === 'GET' && req.url === '/health') {
+    return send(res, 200, { ok: true, stt: engineReady('whisper'), engines: readyEngines(), codex: codex.running });
   }
   if (req.method === 'GET' && req.url.startsWith('/stt/poll')) {
     const u = new URL(req.url, 'http://127.0.0.1');
-    const job = sttJobs.get(u.searchParams.get('videoId') || '');
+    const job = sttJobs.get(jobKey(u.searchParams.get('videoId') || '', u.searchParams.get('lang'), u.searchParams.get('engine') || 'whisper'));
     if (!job) return send(res, 404, { error: 'no job' });
     const since = Number(u.searchParams.get('since')) || 0;
     job.touched = Date.now();
-    return send(res, 200, { state: job.state, msg: job.msg, lang: job.lang, total: job.cues.length, cues: job.cues.slice(since) });
+    return send(res, 200, { state: job.state, msg: job.msg, prog: job.prog, lang: job.detected, used: job.used, total: job.cues.length, cues: job.cues.slice(since) });
   }
-  if (req.method === 'POST' && req.url === '/translate') {
-    let raw = '';
-    req.on('data', (d) => {
-      raw += d;
-      if (raw.length > 2e6) req.destroy();
+  if (req.method !== 'POST') return send(res, 404, { error: 'not found' });
+  const route = ROUTES[req.url];
+  if (!route) return send(res, 404, { error: 'not found' });
+  readJson(req, route.limit)
+    .then(route.handle)
+    .then((out) => send(res, 200, out))
+    .catch((e) => {
+      if (e.status !== 400) console.error('[오류]', e.message);
+      send(res, e.status || 400, { error: e.message });
     });
-    req.on('end', async () => {
-      try {
-        const body = JSON.parse(raw);
-        if (!Array.isArray(body.lines) || body.lines.length === 0 || body.lines.length > 300) {
-          return send(res, 400, { error: 'lines 형식 오류' });
-        }
-        const t0 = Date.now();
-        const result = await translate(body);
-        console.log(`[번역] ${body.lines.length}줄 ${((Date.now() - t0) / 1000).toFixed(1)}초`);
-        send(res, 200, { lines: result });
-      } catch (e) {
-        console.error('[오류]', e.message);
-        send(res, 500, { error: e.message });
-      }
-    });
-    return;
-  }
-  send(res, 404, { error: 'not found' });
 });
+
+const httpError = (status, message) => Object.assign(new Error(message), { status });
+
+// POST 경로: 본문 크기 제한 + 처리 함수 (throw 하면 오류 응답, 기본 400)
+const ROUTES = {
+  '/session': {
+    limit: 1e3,
+    handle: async (b) => {
+      try {
+        await session(String(b.action || ''), String(b.id || ''));
+      } catch (e) {
+        throw httpError(e.message.startsWith('bad ') ? 400 : 500, e.message);
+      }
+      return { ok: true, codex: codex.running };
+    },
+  },
+  '/stt/start': {
+    limit: 1e5,
+    handle: async (b) => {
+      const job = sttStart(String(b.videoId || ''), b.from, String(b.lang || ''), String(b.engine || 'whisper'));
+      return { state: job.state, msg: job.msg, engine: job.engine };
+    },
+  },
+  '/translate': {
+    limit: 2e6,
+    handle: async (body) => {
+      if (!Array.isArray(body.lines) || body.lines.length === 0 || body.lines.length > 300) throw httpError(400, 'lines 형식 오류');
+      const t0 = Date.now();
+      const via = codex.running ? '상주' : 'exec';
+      let result;
+      try {
+        result = await translate(body);
+      } catch (e) {
+        throw httpError(500, e.message);
+      }
+      const pair = `${body.sourceLang || '?'}→${body.targetLang || 'ko'}`;
+      console.log(`${new Date().toTimeString().slice(0, 8)} [번역] ${pair} ${body.lines.length}줄 ${((Date.now() - t0) / 1000).toFixed(1)}초 (${via})`);
+      return { lines: result };
+    },
+  },
+};
 
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`yt-ko 호스트 실행 중: http://127.0.0.1:${PORT}  (codex 모델: ${MODEL || '기본'})`);
 });
 process.on('exit', () => {
-  try { if (sttProc) sttProc.kill(); } catch (_) {}
+  codex.stop();
+  for (const p of sttProcs.values()) try { p.kill(); } catch (_) {}
   try { fs.rmSync(WORKDIR, { recursive: true, force: true }); } catch (_) {}
 });
 process.on('SIGINT', () => process.exit(0));
+process.on('SIGTERM', () => process.exit(0)); // systemctl stop/restart

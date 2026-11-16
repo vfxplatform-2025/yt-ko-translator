@@ -3,7 +3,10 @@
   if (window.__ytko) return;
   window.__ytko = true;
 
-  const captured = {}; // videoId -> { lang, kind, events }
+  const captured = {}; // `${videoId}|${lang}|${kind}` -> events
+
+  const capKey = (v, lang, kind) => `${v}|${lang || ''}|${kind || ''}`;
+  const baseLang = (l) => String(l || '').toLowerCase().split('-')[0];
 
   function parseJson3(text) {
     try {
@@ -22,7 +25,7 @@
       const events = parseJson3(text);
       if (!events || !events.length) return;
       const v = u.searchParams.get('v');
-      captured[v] = { lang: u.searchParams.get('lang') || '', kind: u.searchParams.get('kind') || '', events };
+      captured[capKey(v, u.searchParams.get('lang'), u.searchParams.get('kind'))] = events;
     } catch (_) {}
   }
 
@@ -63,13 +66,33 @@
     return pr;
   }
 
-  function pickTrack(tracks) {
+  // source: 'auto' 또는 언어 코드, target: 번역할 언어 코드
+  function pickTrack(tracks, source, target) {
     const manual = tracks.filter((t) => t.kind !== 'asr');
     const asr = tracks.filter((t) => t.kind === 'asr');
-    return manual.find((t) => !t.languageCode.startsWith('ko')) || asr[0] || manual[0] || tracks[0];
+    if (source && source !== 'auto') {
+      const want = baseLang(source);
+      const hit = manual.find((t) => baseLang(t.languageCode) === want) || asr.find((t) => baseLang(t.languageCode) === want);
+      if (hit) return { track: hit, sourceMissing: false };
+    }
+    const tb = baseLang(target);
+    const track = manual.find((t) => baseLang(t.languageCode) !== tb) || asr[0] || manual[0] || tracks[0];
+    return { track, sourceMissing: !!(source && source !== 'auto') };
   }
 
-  async function getCaptions(videoId) {
+  // 가로챈 자막 찾기: 정확히 같은 트랙 -> 같은 언어의 다른 종류(수동/자동) 순
+  function findCaptured(videoId, track) {
+    const exact = captured[capKey(videoId, track.languageCode, track.kind)];
+    if (exact) return exact;
+    const want = baseLang(track.languageCode);
+    for (const k in captured) {
+      const [v, lang] = k.split('|');
+      if (v === videoId && baseLang(lang) === want) return captured[k];
+    }
+    return null;
+  }
+
+  async function getCaptions(videoId, source = 'auto', target = 'ko') {
     // 플레이어 응답이 준비될 때까지 잠시 대기
     let pr = null;
     for (let i = 0; i < 30 && !pr; i++) {
@@ -84,14 +107,16 @@
         pr.captions.playerCaptionsTracklistRenderer &&
         pr.captions.playerCaptionsTracklistRenderer.captionTracks) ||
       [];
-    if (!tracks.length) return { title, channel, none: true };
+    const list = tracks.map((t) => ({ lang: t.languageCode, kind: t.kind || '' }));
+    if (!tracks.length) return { title, channel, none: true, tracks: list };
 
-    const track = pickTrack(tracks);
-    const base = { title, channel, lang: track.languageCode, kind: track.kind || '' };
-    if (track.languageCode.startsWith('ko')) return { ...base, skip: 'ko' };
+    const { track, sourceMissing } = pickTrack(tracks, source, target);
+    const base = { title, channel, lang: track.languageCode, kind: track.kind || '', tracks: list, sourceMissing };
+    if (baseLang(track.languageCode) === baseLang(target)) return { ...base, skip: 'same' };
 
     // 1) 이미 가로챈 자막이 있으면 사용
-    if (captured[videoId]) return { ...base, events: captured[videoId].events };
+    let got = findCaptured(videoId, track);
+    if (got) return { ...base, events: got };
 
     // 2) 직접 요청
     try {
@@ -114,7 +139,7 @@
         if (player.toggleSubtitlesOn) player.toggleSubtitlesOn();
       } catch (_) {}
       for (let i = 0; i < 30; i++) {
-        if (captured[videoId]) return { ...base, events: captured[videoId].events };
+        if ((got = findCaptured(videoId, track))) return { ...base, events: got };
         await sleep(300);
       }
     }
@@ -126,7 +151,7 @@
     if (ev.source !== window || !d || d.ytko !== 'req') return;
     try {
       let result;
-      if (d.type === 'getCaptions') result = await getCaptions(d.payload.videoId);
+      if (d.type === 'getCaptions') result = await getCaptions(d.payload.videoId, d.payload.source, d.payload.target);
       else throw new Error('unknown type');
       window.postMessage({ ytko: 'res', id: d.id, result }, '*');
     } catch (e) {

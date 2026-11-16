@@ -2,7 +2,9 @@
   position: absolute;
   left: 0;
   right: 0;
-  bottom: 9%;
+  /* 위치는 팝업의 "자막 위치"(--ytko-bottom). 컨트롤 바가 보일 때는 그 위로 올림 */
+  bottom: var(--ytko-bottom, 9%);
+  transition: bottom 0.2s;
   z-index: 60;
   display: flex;
   flex-direction: column;
@@ -52,4 +54,91 @@
 /* 원본(유튜브) 자막은 숨기고 한글 오버레이만 표시 */
 html.ytko-active .ytp-caption-window-container {
   display: none !important;
+}
+
+/* 상태 표시 진행 막대 */
+#ytko-status .ytko-st-bar {
+  margin-top: 4px;
+  width: 190px;
+  height: 3px;
+  border-radius: 2px;
+  background: rgba(255, 255, 255, 0.25);
+  overflow: hidden;
+}
+#ytko-status .ytko-st-bar > i {
+  display: block;
+  height: 100%;
+  width: 0;
+  background: linear-gradient(90deg, #8b7dff, #c4b5fd);
+  transition: width 0.4s;
+}
+#ytko-status .ytko-st-bar.ytko-busy > i {
+  width: 35% !important;
+  animation: ytko-busy 1.2s ease-in-out infinite;
+}
+@keyframes ytko-busy {
+  0% { transform: translateX(-100%); }
+  100% { transform: translateX(290%); }
+}
+
+/* 읽을 시간이 남아 위에 함께 보이는 이전 자막 */
+#ytko-overlay .ytko-prev {
+  opacity: 0.5;
+  font-size: 0.78em;
+}
+
+/* [音楽] 같은 소리 설명 줄은 ♪ 로 작게 */
+#ytko-overlay .ytko-tag {
+  color: #bbb;
+  font-size: 0.8em;
+}
+
+/* 플레이어 컨트롤의 AICC 버튼. 크기는 content.js 가 CC 버튼을 재서 맞춤.
+   꺼짐: 테두리만 + 흐리게 / 켜짐: 채움 + 아래 빨간 줄 (CC 버튼과 같은 표시) */
+#ytko-btn {
+  position: relative;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  vertical-align: top;
+  align-self: center;
+  width: auto;
+  padding: 0 6px;
+}
+#ytko-btn svg {
+  display: block;
+  overflow: visible;
+}
+#ytko-btn .ytko-box {
+  fill: none;
+  stroke: #fff;
+  stroke-width: 1.6;
+}
+#ytko-btn .ytko-txt {
+  fill: #fff;
+  font: 700 10.5px "Roboto", "Arial", sans-serif;
+}
+#ytko-btn[aria-pressed="false"] svg {
+  opacity: 0.75;
+}
+#ytko-btn[aria-pressed="true"] .ytko-box {
+  fill: #fff;
+}
+#ytko-btn[aria-pressed="true"] .ytko-txt {
+  fill: #0f0f0f;
+}
+#ytko-btn[aria-pressed="true"]::after {
+  content: "";
+  position: absolute;
+  left: 32%;
+  right: 32%;
+  bottom: 12%;
+  height: 3px;
+  border-radius: 3px;
+  background: #f00;
+}
+
+/* 플레이어 컨트롤 바가 나타나 있을 때(마우스 올림/일시정지) 자막이 가려지지 않게 그 높이만큼 올림 */
+.html5-video-player:not(.ytp-autohide) #ytko-overlay {
+  bottom: calc(var(--ytko-bottom, 9%) + 56px);
 }
