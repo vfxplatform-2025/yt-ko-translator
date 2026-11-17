@@ -11,7 +11,7 @@
   const LOOKAHEAD_SEC = 12 * 60; // 재생 위치보다 이만큼 앞까지만 번역 (구독 한도 절약)
   const MAX_TRIES = 3;
 
-  let settings = { enabled: true, fontSize: 32, subPos: 2, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
+  let settings = { ...YTKO_DEFAULTS }; // 기본값은 defaults.js
   // [音楽] / [Music] / ♪ 처럼 소리 설명만 있는 줄 (번역하지 않고 ♪ 로 표시)
   const TAG_ONLY = /^[\s\[\(（【〔<>-]*(音楽|音樂|拍手|笑い?|歓声|music|applause|laughter|laughs|cheering|음악|박수|웃음|♪|♫|♬|～|〜|~|\s)+[\]\)）】〕>\s.。♪♫♬～〜~-]*$/i;
   const baseLang = (l) => String(l || '').toLowerCase().split('-')[0];
@@ -37,16 +37,21 @@
     settings = { ...settings, ...s };
     applySettings();
   });
+  // 이 설정이 바뀌면 번역을 새로 시작. 그중 KEEP_SHOWN_KEYS 만 바뀐 경우는 기존 번역을 임시로 계속 표시
+  const RESTART_KEYS = ['sttEnabled', 'preferStt', 'sttEngine', 'translator', 'style', 'sourceLang', 'targetLang'];
+  const KEEP_SHOWN_KEYS = ['translator', 'style'];
   chrome.storage.onChanged.addListener((changes, area) => {
     if (area !== 'sync') return;
     for (const k in changes) settings[k] = changes[k].newValue;
     applySettings();
     lastShown = null;
     if ('enabled' in changes && !settings.enabled) setActive(false);
-    else if (active && ['sttEnabled', 'preferStt', 'sttEngine', 'translator', 'sourceLang', 'targetLang'].some((k) => k in changes)) {
-      // 번역 엔진을 바꾸면 호스트에 알리고(codex 면 미리 띄움, Claude 면 상주 codex 를 내림) 새 엔진으로 처음부터 번역
+    else if (active && RESTART_KEYS.some((k) => k in changes)) {
+      // 번역 엔진을 바꾸면 호스트에 알림 (codex 면 미리 띄우고, Claude 면 상주 codex 를 내림)
       if ('translator' in changes) send({ type: 'session', action: 'start', id: sessionId, translator: settings.translator });
-      start();
+      // 말투·번역 엔진만 바뀌었으면 원문이 같으므로, 새 번역이 올 때까지 지금 번역을 그대로 보여줌
+      const keep = RESTART_KEYS.every((k) => !(k in changes) || KEEP_SHOWN_KEYS.includes(k));
+      start(keep ? currentTranslations() : null);
     }
     ensureButton();
   });
@@ -181,8 +186,8 @@
     }
   }
 
-  // 원문이 이미 번역 언어면 번역 없이 그대로 표시
-  const passthrough = (s) => !!s.srcLang && baseLang(s.srcLang) === baseLang(s.target);
+  // 원문이 이미 번역 언어면 번역 없이 그대로 표시 (단, 번역 말투를 골랐으면 같은 언어라도 말투를 바꿔 다시 씀)
+  const passthrough = (s) => !s.restyle && !!s.srcLang && baseLang(s.srcLang) === baseLang(s.target);
   const setDone = (c, text) => {
     c.t = text;
     c.state = 2;
@@ -201,6 +206,7 @@
         cue.tag = true;
       } else if (passthrough(s)) setDone(cue, c.o);
       else if (s.tcache[k]) setDone(cue, s.tcache[k]);
+      else if (s.carry?.has(k)) cue.old = s.carry.get(k); // 새 번역이 올 때까지 보여줄 이전 번역
       s.cues.push(cue);
       added++;
     }
@@ -228,8 +234,8 @@
   }
 
   // ---------- 캐시 (영상별 번역 결과) ----------
-  // 번역 캐시는 영상 + 원문(자막 트랙 또는 음성 인식) + 번역 언어 + 번역 엔진별로 따로 저장
-  const cacheKey = (s) => `tr:${s.videoId}:${s.srcKey}:${s.target}:${s.translator}`;
+  // 번역 캐시는 영상 + 원문(자막 트랙 또는 음성 인식) + 번역 언어 + 번역 엔진 + 말투별로 따로 저장
+  const cacheKey = (s) => `tr:${s.videoId}:${s.srcKey}:${s.target}:${s.translator}${s.style === 'natural' ? '' : ':' + s.style}`; // 기본 말투는 이전 캐시 그대로
   function loadCache(s) {
     return new Promise((resolve) => {
       const k = cacheKey(s);
@@ -261,14 +267,23 @@
   }
   const requestStt = (s, at) => send({ type: 'stt-start', videoId: s.videoId, from: Math.max(0, at - 5), lang: s.sttLang, engine: s.sttEngine });
 
-  async function start() {
+  // 지금 영상의 번역 결과 (자막 시각 키 -> 번역문). 말투·엔진을 바꿀 때 새 번역이 올 때까지 임시로 표시
+  function currentTranslations() {
+    if (!st || st.videoId !== videoIdNow()) return null;
+    return new Map(st.cues.filter((c) => c.t && !c.tag).map((c) => [keyOf(c), c.t]));
+  }
+
+  // carry: 새 번역이 올 때까지 대신 보여줄 이전 번역 (currentTranslations 결과, 없으면 null)
+  async function start(carry = null) {
     stop();
     const videoId = videoIdNow();
     if (!active || !settings.enabled || !videoId) return;
     const source = settings.sourceLang || 'auto';
     const target = settings.targetLang || 'ko';
+    const style = settings.style || 'natural';
     const s = {
-      videoId, source, target, translator: settings.translator || 'codex', cues: [], keys: new Set(), tcache: {}, running: 0, timers: [], dead: false,
+      videoId, source, target, translator: settings.translator || 'codex', style, restyle: style !== 'natural', carry,
+      cues: [], keys: new Set(), tcache: {}, running: 0, timers: [], dead: false,
       title: '', channel: '', lastTime: 0, mode: 'captions', srcKey: '', srcLang: '',
       sttLang: '', sttEngine: settings.sttEngine || 'whisper', sttSince: 0, sttDone: false, sttMsg: '', sttState: '', sttProg: null, sttPolling: false, lastSeekStart: 0,
       fatal: '', hostErr: '', blockedUntil: 0,
@@ -278,13 +293,13 @@
     };
     st = s;
     if (!ensureOverlay()) {
-      setTimeout(() => st === s && start(), 800);
+      setTimeout(() => st === s && start(carry), 800);
       return;
     }
     showStatus('자막 불러오는 중…', false, 'busy');
     let cap;
     try {
-      cap = await mainCall('getCaptions', { videoId, source, target });
+      cap = await mainCall('getCaptions', { videoId, source, target, restyle: s.restyle });
     } catch (e) {
       if (st !== s) return;
       // 자막 트랙은 있는데 데이터를 못 받은 경우(유튜브 차단 등) -> 음성 인식으로 대체
@@ -307,7 +322,7 @@
     const capInfo = (state) => Object.assign(s.info, { mode: 'captions', lang: cap.lang, kind: cap.kind, state });
     if (cap.skip === 'same') {
       capInfo('same');
-      return showStatus(`원문 자막이 이미 ${langName(target)}입니다`);
+      return showStatus(`원문 자막이 이미 ${langName(target)}입니다 (팝업에서 번역 말투를 고르면 그 말투로 바꿔 줍니다)`);
     }
 
     if (cap.none) {
@@ -495,7 +510,7 @@
     const idx = s.cues.indexOf(batch[0]);
     const context = s.cues.slice(Math.max(0, idx - CTX), idx).map((c) => c.o).join('\n');
     // 응답 시간 제한은 background.js 의 fetch 에서 (요청 자체를 취소)
-    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator, urgent } });
+    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator, style: s.style, urgent } });
     s.running--;
     if (s.dead || s !== st) return;
     if (res.ok) {
@@ -571,10 +586,11 @@
       const c = s.cues[i];
       const prev = n < shown.length - 1; // 위에 남아 있는 이전 줄
       const main = document.createElement('div');
-      main.className = 'ytko-line' + (c.t ? '' : ' ytko-pending') + (prev ? ' ytko-prev' : '') + (c.tag ? ' ytko-tag' : '');
-      main.textContent = c.t || c.o; // 번역 전/실패 시 원문
+      const translated = !!(c.t || c.old); // 아니면 번역 전/실패라 원문을 흐리게 표시
+      main.className = 'ytko-line' + (translated ? '' : ' ytko-pending') + (prev ? ' ytko-prev' : '') + (c.tag ? ' ytko-tag' : '');
+      main.textContent = shownText(c);
       overlay.appendChild(main);
-      if (settings.showOriginal && c.t && !c.tag) {
+      if (settings.showOriginal && translated && !c.tag) {
         const o = document.createElement('div');
         o.className = 'ytko-line ytko-orig' + (prev ? ' ytko-prev' : '');
         o.textContent = c.o;
@@ -583,11 +599,13 @@
     });
   }
 
+  // 화면에 보여줄 글: 번역문 -> (말투·엔진을 바꾼 직후) 이전 번역 -> 원문
+  const shownText = (c) => c.t || c.old || c.o;
   // 자막을 읽을 시간 보장: 말이 짧게 끝나도 글자 수에 맞춰 더 오래 보여줌 (초당 약 10자, 1.5~8초)
   const readTime = (text) => Math.min(8, Math.max(1.5, 0.8 + String(text || '').length / 10));
   const OVERLAP = 1.0; // 다음 자막이 나온 뒤에도 이전 자막을 위에 남겨두는 최대 시간(초)
   const shownUntil = (c, next) => {
-    const want = Math.max(c.e + 0.4, c.s + readTime(c.t || c.o));
+    const want = Math.max(c.e + 0.4, c.s + readTime(shownText(c)));
     return next ? Math.min(want, Math.max(c.e, next.s + OVERLAP)) : want;
   };
   const MAX_LINES = 1; // 2로 바꾸면 이전 자막을 위에 OVERLAP초 동안 함께 표시

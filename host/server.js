@@ -48,16 +48,33 @@ function langName(code) {
   try { return langNames.of(code) || code; } catch (_) { return code; }
 }
 
-function buildPrompt({ title, channel, lines, context, sourceLang, targetLang }) {
+// 번역 말투 (팝업에서 고름). 확장 프로그램은 키만 보내고 지시문은 여기서 정함. natural = 기본(지시 없음)
+const STYLES = {
+  natural: '',
+  polite: '친절하고 상냥한 존댓말로, 듣는 사람을 배려하는 따뜻한 말투로 번역합니다.',
+  casual: '친한 친구끼리 편하게 말하는 반말로 번역합니다.',
+  hiphop: '힙합 래퍼처럼 자신감 넘치고 허세 있는 스트릿 말투로 번역합니다. "요", "ㄹㅇ", "개쩐다", "플렉스", "리스펙" 같은 힙합·인터넷 슬랭과 영어 감탄사를 자연스럽게 섞고, 말끝에 리듬감을 줍니다.',
+  aave: 'AAVE(African American Vernacular English, 미국 흑인 영어 방언) 슬랭으로, 텐션을 확 올려 오버하는 말투로 번역합니다. 번역 언어가 영어면 AAVE 의 실제 문법과 표현(habitual be, 생략된 copula, ain’t, finna, on God, no cap, deadass, bruh 등)을 씁니다. 다른 언어면 그 언어의 스트릿 슬랭으로 옮깁니다 (한국어면 "브로", "맨", "찐으로", "노캡", "레전드", "미쳤다", "개-", "ㄹㅇ" 같은 표현과 반말). 모든 줄에 슬랭이나 감탄사를 최소 하나 넣고, 평범한 말도 과장해서 크게 부풀립니다 ("조금 무섭다" → "와 브로 찐으로 개쫄려", "맵다" → "혀 녹아내린다 노캡", "불친절했다" → "태도 미쳤더라 ㄹㅇ"). 인종을 비하하거나 고정관념을 담은 내용은 넣지 않습니다.',
+  gangster: '느와르·갱스터 영화의 조폭처럼 거칠고 위압적인 반말로 번역합니다. 시비조로 말하고, "새끼", "젠장", "씨발" 같은 욕설·비속어도 상황에 맞게 섞되 매 줄마다 넣지는 않습니다.',
+  sageuk: '조선시대 사극 대사처럼 예스러운 말투(~하오, ~하시오, ~느니라 등)로 번역합니다.',
+  news: '뉴스 앵커처럼 또박또박하고 격식 있는 보도 말투로 번역합니다.',
+  cute: '귀엽고 애교 있는 말투로, 말끝을 부드럽게 하거나 귀여운 어미를 써서 번역합니다.',
+  pretty: '"예쁜 말"로 번역합니다. 부정적이거나 거칠고 공격적인 표현은 긍정적이고 부드러운 표현으로 바꿉니다 (비난·불평은 바람이나 부탁으로, 욕설·비속어는 순화해서, 단정적인 말은 배려하는 말로). 무슨 일이 있었는지 같은 사실은 바꾸지 않습니다.',
+  sexy: '나른하고 유혹하듯 은근한 말투로, 낮고 느긋하게 속삭이는 느낌이 나게 번역합니다. 노골적인 성적 표현은 쓰지 말고 분위기로만 표현합니다.',
+};
+const styleOf = (s) => (Object.hasOwn(STYLES, s) ? s : 'natural');
+
+function buildPrompt({ title, channel, lines, context, sourceLang, targetLang, style }) {
   const input = lines.map((l) => ({ i: l.i, t: l.t }));
   const target = LANG_RE.test(targetLang || '') ? targetLang : 'ko';
   const tName = langName(target);
   const srcLine = LANG_RE.test(sourceLang || '') ? `원문 언어: ${langName(sourceLang)}\n` : '';
+  const styleRule = STYLES[styleOf(style)];
   return `당신은 유튜브 영상 자막 번역가입니다. 아래 자막 줄들을 자연스러운 ${tName} 구어체로 번역하세요.
 
 규칙:
 - 직역하지 말고, ${tName} 원어민이 실제로 말하는 것처럼 자연스럽게 의역합니다.
-- 각 줄은 자막 한 줄이므로 짧고 읽기 쉽게 유지합니다. 한 줄이 문장 중간에서 끊겨 있어도 앞뒤 줄의 문맥을 보고 자연스럽게 이어지게 번역합니다.
+${styleRule ? `- 말투: ${styleRule} 내용과 의미는 그대로 두고 말투만 바꿉니다. 원문이 이미 ${tName}이어도 그대로 옮기지 말고 이 말투로 바꿔 다시 씁니다.\n` : ''}- 각 줄은 자막 한 줄이므로 짧고 읽기 쉽게 유지합니다. 한 줄이 문장 중간에서 끊겨 있어도 앞뒤 줄의 문맥을 보고 자연스럽게 이어지게 번역합니다.
 - 고유명사, 브랜드, 기술 용어는 ${tName} 사용자들 사이에서 통용되는 표기를 쓰고, 통용 표기가 없으면 원문을 그대로 둡니다.
 - 입력 줄 수와 출력 줄 수는 반드시 같아야 하며, 각 i 값을 그대로 유지합니다.
 - 설명, 코드블록, 머리말 없이 JSON 배열만 출력합니다. 형식: [{"i":0,"t":"번역문"}, ...]

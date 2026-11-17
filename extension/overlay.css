@@ -94,7 +94,7 @@ html.ytko-active .ytp-caption-window-container {
 }
 
 /* 플레이어 컨트롤의 AICC 버튼. 크기는 content.js 가 CC 버튼을 재서 맞춤.
-   꺼짐: 테두리만 + 흐리게 / 켜짐: 채움 + 아래 빨간 줄 (CC 버튼과 같은 표시) */
+   꺼짐: 테두리만 (CC 버튼과 같은 흰색) / 켜짐: 채움 + 아래 빨간 줄 (CC 버튼과 같은 표시) */
 #ytko-btn {
   position: relative;
   display: inline-flex;
@@ -117,9 +117,6 @@ html.ytko-active .ytp-caption-window-container {
 #ytko-btn .ytko-txt {
   fill: #fff;
   font: 700 10.5px "Roboto", "Arial", sans-serif;
-}
-#ytko-btn[aria-pressed="false"] svg {
-  opacity: 0.75;
 }
 #ytko-btn[aria-pressed="true"] .ytko-box {
   fill: #fff;

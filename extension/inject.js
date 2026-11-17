@@ -101,7 +101,8 @@
     return null;
   }
 
-  async function getCaptions(videoId, source = 'auto', target = 'ko') {
+  // restyle: 번역 말투를 고른 경우. 원문이 번역 언어와 같아도 건너뛰지 않음 (말투만 바꿔 다시 씀)
+  async function getCaptions(videoId, source = 'auto', target = 'ko', restyle = false) {
     // 플레이어 응답이 준비될 때까지 잠시 대기
     let pr = null;
     for (let i = 0; i < 30 && !pr; i++) {
@@ -121,7 +122,7 @@
 
     const { track, sourceMissing } = pickTrack(tracks, source, target);
     const base = { title, channel, lang: track.languageCode, kind: track.kind || '', tracks: list, sourceMissing };
-    if (baseLang(track.languageCode) === baseLang(target)) return { ...base, skip: 'same' };
+    if (!restyle && baseLang(track.languageCode) === baseLang(target)) return { ...base, skip: 'same' };
 
     // 1) 이미 가로챈 자막이 있으면 사용
     let got = findCaptured(videoId, track);
@@ -171,7 +172,7 @@
     if (ev.source !== window || !d || d.ytko !== 'req') return;
     try {
       let result;
-      if (d.type === 'getCaptions') result = await getCaptions(d.payload.videoId, d.payload.source, d.payload.target);
+      if (d.type === 'getCaptions') result = await getCaptions(d.payload.videoId, d.payload.source, d.payload.target, !!d.payload.restyle);
       else throw new Error('unknown type');
       window.postMessage({ ytko: 'res', id: d.id, result }, '*');
     } catch (e) {

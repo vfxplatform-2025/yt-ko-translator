@@ -1,4 +1,4 @@
-const defaults = { enabled: true, fontSize: 32, subPos: 2, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
+const defaults = YTKO_DEFAULTS; // defaults.js
 const $ = (id) => document.getElementById(id);
 
 // 고를 수 있는 언어 (YouTube 자막 코드 / Whisper 코드와 앞부분이 같도록)
@@ -19,7 +19,7 @@ fill($('targetLang'), false);
 
 // 설정 칸: id 가 저장 키와 같음
 const TOGGLES = ['enabled', 'sttEnabled', 'preferStt', 'showOriginal'];
-const SELECTS = ['sourceLang', 'targetLang', 'sttEngine', 'translator'];
+const SELECTS = ['sourceLang', 'targetLang', 'sttEngine', 'translator', 'style'];
 chrome.storage.sync.get(defaults, (s) => {
   for (const k of TOGGLES) $(k).checked = s[k];
   for (const k of SELECTS) $(k).value = s[k];
