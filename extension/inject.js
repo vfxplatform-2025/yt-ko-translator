@@ -75,8 +75,17 @@
     return pr;
   }
 
-  // source: 'auto' 또는 언어 코드, target: 번역할 언어 코드
-  function pickTrack(tracks, source, target) {
+  // 영상의 원래 오디오 언어 (모르면 ''). 유튜브 AI 더빙이 붙은 영상은 오디오 트랙이 여러 개이고 기본 트랙이 원본
+  function originalAudioLang(pr) {
+    const r = pr.captions && pr.captions.playerCaptionsTracklistRenderer;
+    const at = r && r.audioTracks && r.audioTracks[r.defaultAudioTrackIndex || 0];
+    if (at && at.audioTrackId) return baseLang(at.audioTrackId.split('.')[0]);
+    const f = pr.streamingData && (pr.streamingData.adaptiveFormats || []).find((x) => x.audioTrack && x.audioTrack.audioIsDefault);
+    return f && f.audioTrack.id ? baseLang(f.audioTrack.id.split('.')[0]) : '';
+  }
+
+  // source: 'auto' 또는 언어 코드, target: 번역할 언어 코드, orig: 원래 오디오 언어
+  function pickTrack(tracks, source, target, orig) {
     const manual = tracks.filter((t) => t.kind !== 'asr');
     const asr = tracks.filter((t) => t.kind === 'asr');
     if (source && source !== 'auto') {
@@ -85,7 +94,10 @@
       if (hit) return { track: hit, sourceMissing: false };
     }
     const tb = baseLang(target);
-    const track = manual.find((t) => baseLang(t.languageCode) !== tb) || asr[0] || manual[0] || tracks[0];
+    // 자동 생성 자막이 여러 개면 원래 오디오 언어의 것을 씀. 나머지는 AI 더빙 음성을 받아쓴 것이라
+    // 이미 한 번 기계 번역된 내용 (그걸 다시 번역하면 없는 말이 생김)
+    const origAsr = orig && asr.find((t) => baseLang(t.languageCode) === orig);
+    const track = manual.find((t) => baseLang(t.languageCode) !== tb) || origAsr || asr[0] || manual[0] || tracks[0];
     return { track, sourceMissing: !!(source && source !== 'auto') };
   }
 
@@ -120,7 +132,7 @@
     const list = tracks.map((t) => ({ lang: t.languageCode, kind: t.kind || '' }));
     if (!tracks.length) return { title, channel, none: true, tracks: list };
 
-    const { track, sourceMissing } = pickTrack(tracks, source, target);
+    const { track, sourceMissing } = pickTrack(tracks, source, target, originalAudioLang(pr));
     const base = { title, channel, lang: track.languageCode, kind: track.kind || '', tracks: list, sourceMissing };
     if (!restyle && baseLang(track.languageCode) === baseLang(target)) return { ...base, skip: 'same' };
 

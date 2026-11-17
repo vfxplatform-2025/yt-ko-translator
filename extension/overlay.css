@@ -156,6 +156,8 @@ html.ytko-active .ytp-caption-window-container {
 #ytko-btn.ytko-shorts svg {
   height: 16px;
   width: 34px;
+  /* 숏츠 아이콘들과 같은 얇은 그림자 (유튜브가 CC 등 아이콘에 주는 값) */
+  filter: drop-shadow(rgba(0, 0, 0, 0.8) 0 0 1px);
 }
 /* 숏츠는 아래쪽에 채널명·제목·진행 막대가 겹쳐 있어 그 위로 띄움 (컨트롤 표시 여부와 무관) */
 #shorts-player #ytko-overlay,
