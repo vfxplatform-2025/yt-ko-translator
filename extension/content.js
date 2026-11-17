@@ -720,20 +720,13 @@
 
   // ---------- 영상 전환 감지 (유튜브는 SPA) ----------
   let lastId = null;
-  let lastWasShorts = false;
   function check() {
     if (!alive()) return retire();
     const id = videoIdNow();
     if (id !== lastId) {
-      const shortsToShorts = active && id && lastWasShorts && isShorts();
       lastId = id;
-      lastWasShorts = isShorts();
-      if (shortsToShorts) {
-        start(); // 숏츠끼리 넘길 때는 번역을 켠 채로 다음 숏츠를 번역
-      } else {
-        setActive(false); // 다른 영상이나 페이지로 가면 번역 끔
-        stop();
-      }
+      setActive(false); // 다른 영상(다음 숏츠 포함)이나 페이지로 가면 번역 끔
+      stop();
     }
     ensureButton();
   }
