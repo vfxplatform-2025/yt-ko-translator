@@ -142,3 +142,33 @@ html.ytko-active .ytp-caption-window-container {
 .html5-video-player:not(.ytp-autohide) #ytko-overlay {
   bottom: calc(var(--ytko-bottom, 2%) + 56px);
 }
+
+/* ---------- 숏츠 ---------- */
+/* 숏츠 위쪽 오른쪽 컨트롤(CC·더보기·전체화면) 묶음 안의 버튼. 다른 버튼과 같은 48px 높이 */
+#ytko-btn.ytko-shorts {
+  height: 48px;
+  padding: 0 10px;
+  margin: 0;
+  border: 0;
+  background: none;
+  cursor: pointer;
+  color: #fff;
+  /* 숏츠 컨트롤 묶음은 pointer-events: none 이고 버튼마다 다시 켜는 구조라, 안 켜면 클릭이 뒤의 영상으로 빠짐 */
+  pointer-events: auto;
+}
+#ytko-btn.ytko-shorts svg {
+  height: 16px;
+  width: 34px;
+}
+/* 숏츠는 아래쪽에 채널명·제목·진행 막대가 겹쳐 있어 그 위로 띄움 (컨트롤 표시 여부와 무관) */
+#shorts-player #ytko-overlay,
+#shorts-player.html5-video-player:not(.ytp-autohide) #ytko-overlay {
+  bottom: calc(var(--ytko-bottom, 2%) + 120px);
+}
+#shorts-player #ytko-overlay .ytko-line {
+  max-width: 92%;
+}
+/* 숏츠는 왼쪽 위에 재생·음소거 버튼이 있어 상태 표시를 그 아래로 */
+#shorts-player #ytko-status {
+  top: 72px;
+}

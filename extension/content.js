@@ -3,6 +3,9 @@
   const BATCH = 30; // 한 번에 번역할 자막 줄 수 (먼 구간)
   const NEAR_BATCH = 10; // 재생 위치 가까운 구간은 작게 나눠 동시에 보냄 (codex 1회: 10줄 약 6초, 30줄 약 15초)
   const NEAR_SEC = 90;
+  const FIRST_BATCH = 3; // 재생 위치 바로 앞은 몇 줄만 먼저 보내 첫 자막을 빨리 띄움 (1~3줄 약 2.5초)
+  const FIRST_SEC = 12;
+  const URGENT_SEC = 30; // 이 안쪽 번역은 동시 요청 한도가 차 있어도 한 칸 더 써서 바로 보냄 (시간 이동 직후 등)
   const CTX = 3; // 번역 시 참고용으로 붙이는 직전 줄 수
   const PARALLEL = 3; // 동시 번역 요청 수
   const LOOKAHEAD_SEC = 12 * 60; // 재생 위치보다 이만큼 앞까지만 번역 (구독 한도 절약)
@@ -101,10 +104,19 @@
   };
 
   // ---------- 유틸 ----------
-  const videoIdNow = () => new URLSearchParams(location.search).get('v');
-  const getVideo = () => document.querySelector('#movie_player video.html5-main-video, video.html5-main-video');
+  // 일반 영상(/watch?v=ID)과 숏츠(/shorts/ID). 숏츠는 플레이어가 #shorts-player 로 따로 있음
+  const isShorts = () => location.pathname.startsWith('/shorts/');
+  const videoIdNow = () => {
+    if (location.pathname === '/watch') return new URLSearchParams(location.search).get('v');
+    if (isShorts()) return location.pathname.split('/')[2] || null;
+    return null;
+  };
+  const getPlayerEl = () => document.getElementById(isShorts() ? 'shorts-player' : 'movie_player');
+  const getVideo = () => {
+    const p = getPlayerEl();
+    return p?.querySelector('video.html5-main-video') || p?.querySelector('video') || (isShorts() ? null : document.querySelector('video.html5-main-video'));
+  };
   const curTime = () => getVideo()?.currentTime ?? 0;
-  const getPlayerEl = () => document.getElementById('movie_player');
   const keyOf = (c) => Math.round(c.s * 10);
 
   function ensureOverlay() {
@@ -252,7 +264,7 @@
   async function start() {
     stop();
     const videoId = videoIdNow();
-    if (!active || !settings.enabled || !videoId || location.pathname !== '/watch') return;
+    if (!active || !settings.enabled || !videoId) return;
     const source = settings.sourceLang || 'auto';
     const target = settings.targetLang || 'ko';
     const s = {
@@ -420,21 +432,27 @@
     if (Date.now() < s.blockedUntil) return;
     const horizon = now + LOOKAHEAD_SEC;
     const start = firstIndexAtOrAfter(s.cues, now - 8);
-    while (s.running < PARALLEL) {
+    for (;;) {
       const batch = [];
       let limit = BATCH;
       for (let j = start; j < s.cues.length && s.cues[j].s < horizon && batch.length < limit; j++) {
         if (s.cues[j].state !== 0) continue;
-        if (!batch.length && s.cues[j].s - now < NEAR_SEC) limit = NEAR_BATCH;
+        if (!batch.length) {
+          const gap = s.cues[j].s - now;
+          limit = gap < FIRST_SEC ? FIRST_BATCH : gap < NEAR_SEC ? NEAR_BATCH : BATCH;
+        }
         batch.push(s.cues[j]);
       }
       if (!batch.length) break;
+      // 재생 위치 가까운 묶음은 먼 구간 번역이 칸을 다 차지하고 있어도 한 칸 더 써서 바로 보냄
+      const urgent = batch[0].s - now < URGENT_SEC;
+      if (s.running >= PARALLEL + (urgent ? 1 : 0)) break;
       // STT가 아직 진행 중이면 소량 호출을 줄임: 먼 구간은 줄이 모일 때까지, 가까운 구간도 몇 줄짜리는 한 번에 하나만
       if (s.mode === 'stt' && !s.sttDone) {
         const far = batch[0].s - now > 20;
-        if ((far && batch.length < Math.min(limit, 15)) || (!far && batch.length < 4 && s.running > 0)) break;
+        if ((far && batch.length < Math.min(limit, 15)) || (!far && batch.length < Math.min(limit, 4) && s.running > 0)) break;
       }
-      runBatch(s, batch);
+      runBatch(s, batch, urgent);
     }
   }
 
@@ -469,7 +487,7 @@
     showStatus('');
   }
 
-  async function runBatch(s, batch) {
+  async function runBatch(s, batch, urgent = false) {
     batch.forEach((c) => (c.state = 1));
     s.running++;
     s.stats.sent++;
@@ -477,7 +495,7 @@
     const idx = s.cues.indexOf(batch[0]);
     const context = s.cues.slice(Math.max(0, idx - CTX), idx).map((c) => c.o).join('\n');
     // 응답 시간 제한은 background.js 의 fetch 에서 (요청 자체를 취소)
-    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator } });
+    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator, urgent } });
     s.running--;
     if (s.dead || s !== st) return;
     if (res.ok) {
@@ -590,7 +608,7 @@
     chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
       if (retired || !msg || msg.type !== 'ytko-info') return;
       if (!st) {
-        sendResponse({ ok: true, info: null, active, enabled: settings.enabled, onWatch: location.pathname === '/watch' });
+        sendResponse({ ok: true, info: null, active, enabled: settings.enabled, onWatch: !!videoIdNow() });
         return;
       }
       const by = [0, 0, 0, 0];
@@ -647,6 +665,11 @@
   function buttonSlot() {
     const player = getPlayerEl();
     if (!player) return null;
+    // 숏츠: 플레이어 위쪽 오른쪽 컨트롤(CC·더보기·전체화면 묶음) 맨 앞
+    if (isShorts()) {
+      const right = player.closest('ytd-reel-video-renderer')?.querySelector('#right-controls');
+      return right ? { parent: right, before: right.firstChild, shorts: true } : null;
+    }
     const cc = player.querySelector('.ytp-subtitles-button');
     if (cc && cc.parentNode) return { parent: cc.parentNode, before: cc };
     const right = player.querySelector('.ytp-right-controls');
@@ -665,16 +688,16 @@
   }
   function placeButton() {
     let btn = document.getElementById('ytko-btn');
-    const slot = settings.enabled && location.pathname === '/watch' ? buttonSlot() : null;
+    const slot = settings.enabled && videoIdNow() ? buttonSlot() : null;
     if (!slot) {
       btn?.remove();
       return;
     }
-    if (!btn || !getPlayerEl().contains(btn)) {
+    if (!btn || btn.parentNode !== slot.parent) {
       btn?.remove();
       btn = document.createElement('button');
       btn.id = 'ytko-btn';
-      btn.className = 'ytp-button';
+      btn.className = slot.shorts ? 'ytko-shorts' : 'ytp-button';
       btn.innerHTML = BTN_SVG;
       btn.addEventListener('click', (e) => {
         e.stopPropagation();
@@ -683,7 +706,7 @@
       slot.parent.insertBefore(btn, slot.before);
     }
     const cc = slot.before && slot.before.classList && slot.before.classList.contains('ytp-subtitles-button') ? slot.before : null;
-    sizeButton(btn, cc);
+    if (!slot.shorts) sizeButton(btn, cc);
     btn.setAttribute('aria-pressed', String(active));
     btn.title = active ? 'AI 자막 번역 끄기' : 'AI 자막 번역 켜기';
     btn.setAttribute('aria-label', btn.title);
@@ -697,13 +720,20 @@
 
   // ---------- 영상 전환 감지 (유튜브는 SPA) ----------
   let lastId = null;
+  let lastWasShorts = false;
   function check() {
     if (!alive()) return retire();
-    const id = location.pathname === '/watch' ? videoIdNow() : null;
+    const id = videoIdNow();
     if (id !== lastId) {
+      const shortsToShorts = active && id && lastWasShorts && isShorts();
       lastId = id;
-      setActive(false); // 다른 영상이나 페이지로 가면 번역 끔
-      stop();
+      lastWasShorts = isShorts();
+      if (shortsToShorts) {
+        start(); // 숏츠끼리 넘길 때는 번역을 켠 채로 다음 숏츠를 번역
+      } else {
+        setActive(false); // 다른 영상이나 페이지로 가면 번역 끔
+        stop();
+      }
     }
     ensureButton();
   }

@@ -55,7 +55,7 @@
   const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
   function getPlayer() {
-    return document.getElementById('movie_player');
+    return document.getElementById(location.pathname.startsWith('/shorts/') ? 'shorts-player' : 'movie_player');
   }
 
   // 지금 유튜브 CC 가 켜져 있는지 (알 수 없으면 null)

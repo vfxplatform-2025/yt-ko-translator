@@ -18,17 +18,27 @@ const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 3);
 const TIMEOUT_MS = 120000;
 const WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-ko-'));
 
+// 동시 번역 수 제한. 재생 위치 가까운 요청(urgent)은 대기열 맨 앞에 서고, 한도가 차 있어도 한 칸 더 씀
+// (먼 구간 30줄 번역이 칸을 다 차지하고 있어도 시간 이동 직후의 자막이 기다리지 않도록)
 let running = 0;
-const waiters = [];
-async function acquire() {
-  if (running < MAX_CONCURRENT) { running++; return; }
-  await new Promise((r) => waiters.push(r));
-  running++;
+const waiters = []; // { urgent, go }
+const limitOf = (urgent) => MAX_CONCURRENT + (urgent ? 1 : 0);
+async function acquire(urgent = false) {
+  if (running < limitOf(urgent)) { running++; return; }
+  await new Promise((go) => {
+    const w = { urgent, go };
+    const at = urgent ? waiters.findIndex((x) => !x.urgent) : -1; // urgent 는 다른 urgent 뒤, 일반 요청 앞
+    waiters.splice(at < 0 ? waiters.length : at, 0, w);
+  });
 }
 function release() {
   running--;
-  const next = waiters.shift();
-  if (next) next();
+  const w = waiters[0];
+  if (w && running < limitOf(w.urgent)) {
+    waiters.shift();
+    running++;
+    w.go();
+  }
 }
 
 // 언어 코드 -> 이름 (예: 'en' -> '영어', 'zh-Hans' -> '중국어(간체)')
@@ -207,7 +217,7 @@ async function translate(body) {
   const expected = lines.map((l) => l.i);
   const prompt = buildPrompt(body);
   const translator = translatorOf(body.translator);
-  await acquire();
+  await acquire(body.urgent === true);
   try {
     let lastErr;
     for (let attempt = 0; attempt < 2; attempt++) {
@@ -468,7 +478,7 @@ const ROUTES = {
         throw httpError(500, e.message);
       }
       const pair = `${body.sourceLang || '?'}→${body.targetLang || 'ko'}`;
-      console.log(`${new Date().toTimeString().slice(0, 8)} [번역] ${pair} ${body.lines.length}줄 ${((Date.now() - t0) / 1000).toFixed(1)}초 (${via})`);
+      console.log(`${new Date().toTimeString().slice(0, 8)} [번역] ${pair} ${body.lines.length}줄 ${((Date.now() - t0) / 1000).toFixed(1)}초 (${via}${body.urgent === true ? ', 우선' : ''})`);
       return { lines: result };
     },
   },
