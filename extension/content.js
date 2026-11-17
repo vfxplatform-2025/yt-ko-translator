@@ -186,25 +186,45 @@
     }
   }
 
-  // 원문이 이미 번역 언어면 번역 없이 그대로 표시 (단, 번역 말투를 골랐으면 같은 언어라도 말투를 바꿔 다시 씀)
-  const passthrough = (s) => !s.restyle && !!s.srcLang && baseLang(s.srcLang) === baseLang(s.target);
+  // 글자로 확실히 알 수 있는 언어 (글자의 절반 이상이 그 문자). 라틴 문자 언어끼리는 구분 못 하므로 ''
+  const KANA = /[\p{Script=Hiragana}\p{Script=Katakana}]/u;
+  const HANGUL = /\p{Script=Hangul}/u;
+  const SCRIPTS = [['ko', /\p{Script=Hangul}/gu], ['ru', /\p{Script=Cyrillic}/gu], ['th', /\p{Script=Thai}/gu],
+    ['ar', /\p{Script=Arabic}/gu], ['hi', /\p{Script=Devanagari}/gu]];
+  function scriptLang(text) {
+    text = String(text || '');
+    const letters = (text.match(/\p{L}/gu) || []).length;
+    if (!letters) return '';
+    // 일본어는 한자가 대부분이어도 가나가 조금이라도 섞이면 일본어로 봄
+    if (KANA.test(text) && !HANGUL.test(text)) return 'ja';
+    for (const [lang, re] of SCRIPTS) if ((text.match(re) || []).length * 2 >= letters) return lang;
+    return '';
+  }
+  // 줄 하나의 언어: 글자로 판단 -> 음성 인식이 준 줄별 언어(l) -> 영상 전체 원문 언어
+  const lineLang = (s, c) => scriptLang(c.o) || c.l || s.srcLang;
+  // 원문이 이미 번역 언어인 줄은 번역 없이 그대로 표시 (단, 번역 말투를 골랐으면 같은 언어라도 말투를 바꿔 다시 씀).
+  // 줄마다 판단하므로 한국어 내레이션 + 일본어 대화처럼 섞인 영상에서도 한국어 줄만 그대로 둠
+  const passLine = (s, c) => {
+    const lang = !s.restyle && lineLang(s, c);
+    return !!lang && baseLang(lang) === baseLang(s.target);
+  };
   const setDone = (c, text) => {
     c.t = text;
     c.state = 2;
   };
 
   function addCues(s, incoming) {
-    // incoming: [{s,e,o}], 중복(시작 시각이 거의 같은 것)은 무시
+    // incoming: [{s,e,o,l?}] (l: 음성 인식이 준 그 줄의 언어), 중복(시작 시각이 거의 같은 것)은 무시
     let added = 0;
     for (const c of incoming) {
       const k = keyOf(c);
       if (s.keys.has(k) || !c.o) continue;
       s.keys.add(k);
-      const cue = { s: c.s, e: c.e, o: c.o, t: null, state: 0, tries: 0 };
+      const cue = { s: c.s, e: c.e, o: c.o, l: c.l || '', t: null, state: 0, tries: 0 };
       if (TAG_ONLY.test(c.o)) {
         setDone(cue, '♪');
         cue.tag = true;
-      } else if (passthrough(s)) setDone(cue, c.o);
+      } else if (passLine(s, cue)) setDone(cue, c.o);
       else if (s.tcache[k]) setDone(cue, s.tcache[k]);
       else if (s.carry?.has(k)) cue.old = s.carry.get(k); // 새 번역이 올 때까지 보여줄 이전 번역
       s.cues.push(cue);
@@ -319,6 +339,14 @@
     if (!cap.none && !cap.skip && cap.kind === 'asr' && settings.preferStt && settings.sttEnabled) {
       cap = { ...cap, none: true, viaPrefer: true };
     }
+    // 제목은 번역 언어인데 자막은 다른 언어의 자동 생성 자막뿐이면 번역 언어 내레이션이 섞인 영상일 가능성이 큼
+    // (예: 한국 채널이 일본 영상에 한국어 설명을 붙인 숏츠). 자동 자막은 한 언어로만 받아써서 섞인 부분이 깨지므로,
+    // 원문 언어가 자동 감지면 말소리 덩어리마다 언어를 감지하는 음성 인식을 대신 사용
+    if (!cap.none && !cap.skip && settings.sttEnabled && source === 'auto' && cap.kind === 'asr' &&
+        (cap.tracks || []).every((t) => t.kind === 'asr') && baseLang(cap.lang) !== baseLang(target) &&
+        scriptLang(cap.title) === baseLang(target)) {
+      cap = { ...cap, none: true, viaMixed: true };
+    }
     const capInfo = (state) => Object.assign(s.info, { mode: 'captions', lang: cap.lang, kind: cap.kind, state });
     if (cap.skip === 'same') {
       capInfo('same');
@@ -329,6 +357,7 @@
       s.info.mode = 'stt';
       s.info.captionError = cap.captionError || '';
       s.info.viaPrefer = !!cap.viaPrefer;
+      s.info.viaMixed = !!cap.viaMixed;
       if (!settings.sttEnabled) {
         s.info.state = '자막 없음 (음성 인식 꺼짐)';
         return showStatus('이 영상에는 자막이 없습니다 (음성 인식이 꺼져 있음)', true);
@@ -406,7 +435,7 @@
           if (!s.srcLang) {
             s.srcLang = r.lang;
             // 감지 전에 들어온 줄도 원문 그대로 표시할 대상이면 정리
-            if (passthrough(s)) for (const c of s.cues) if (c.state === 0) setDone(c, c.o);
+            for (const c of s.cues) if (c.state === 0 && passLine(s, c)) setDone(c, c.o);
           }
         }
         if (r.cues && r.cues.length) {
@@ -510,7 +539,10 @@
     const idx = s.cues.indexOf(batch[0]);
     const context = s.cues.slice(Math.max(0, idx - CTX), idx).map((c) => c.o).join('\n');
     // 응답 시간 제한은 background.js 의 fetch 에서 (요청 자체를 취소)
-    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator, style: s.style, urgent } });
+    // 원문 언어는 묶음의 줄들이 모두 같은 언어일 때만 알려줌 (섞여 있으면 번역 모델이 줄마다 판단)
+    const langs = new Set(batch.map((c) => baseLang(lineLang(s, c))));
+    const sourceLang = langs.size === 1 ? [...langs][0] : '';
+    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang, targetLang: s.target, translator: s.translator, style: s.style, urgent } });
     s.running--;
     if (s.dead || s !== st) return;
     if (res.ok) {

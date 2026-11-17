@@ -131,6 +131,7 @@ function render(r) {
   // 알림
   if (i.captionError) out.push(note('자막을 받지 못해 음성 인식으로 대체했습니다', 'warn'));
   if (i.viaPrefer) out.push(meta('유튜브 자동 생성 자막 대신 음성 인식을 사용 중'));
+  if (i.viaMixed) out.push(meta('여러 언어가 섞인 영상으로 보여 음성 인식을 사용 중 (자동 자막은 한 언어만 받아씀)'));
   if (i.sourceMissing) out.push(note(`지정한 ${langName(i.source)} 자막이 없어 자동 선택했습니다`, 'warn'));
   if (i.state === 'same') out.push(note('원문이 이미 번역 언어라 번역하지 않습니다', 'ok'));
   else if (i.state && !['active', 'loading', 'same'].includes(i.state)) out.push(note(i.state, 'bad'));

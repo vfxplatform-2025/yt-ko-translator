@@ -9,7 +9,7 @@ node server.js가 엔진마다 그 엔진의 가상환경 Python으로 실행합
 stdin : {"cmd":"start","videoId":"...","from":123.4,"lang":""}   (같은 영상·같은 언어면 탐색 요청으로 처리: 해당 위치부터 우선 처리)
         lang: "" 이면 자동 감지, "en"/"ja" 등이면 그 언어로 고정.
 stdout: {"ev":"status","videoId":..,"req":"<요청 언어>","state":"downloading|loading|transcribing|done|error","msg":"..","prog":0~1}
-        {"ev":"cues","videoId":..,"req":"<요청 언어>","cues":[{"s":..,"e":..,"o":".."}],"lang":"<감지된 언어>","used":"<실제 쓴 엔진>"}
+        {"ev":"cues","videoId":..,"req":"<요청 언어>","cues":[{"s":..,"e":..,"o":"..","l":"<그 줄의 언어, Whisper 만>"}],"lang":"<감지된 언어>","used":"<실제 쓴 엔진>"}
         작업은 (videoId, 요청 언어) 단위이며, 모든 이벤트에 요청 언어가 "req"로 붙습니다.
 """
 import glob
@@ -113,6 +113,7 @@ class WhisperEngine:
         self.model = None
         self.device = None
         self.lang_cache = {}  # 오디오(id) -> 감지 언어 (영상마다 한 번만 감지)
+        self.seen_langs = {}  # 오디오(id) -> 지금까지 나온 언어들 (2개 이상이면 섞인 영상)
 
     def lang_for(self, pcm, at, lang):
         if lang:
@@ -149,10 +150,70 @@ class WhisperEngine:
         lang, _prob, _all = self.load().detect_language(seg, vad_filter=False, language_detection_segments=3)
         return lang
 
+    def chunk_lang(self, pcm, c0, c1):
+        """말소리 덩어리 하나의 언어. 너무 짧거나 확신이 낮으면 None (앞 덩어리 언어를 이어 씀)"""
+        if c1 - c0 < 1.0:
+            return None
+        try:
+            lang, prob, _all = self.load().detect_language(pcm[int(c0 * SR): int(c1 * SR)], vad_filter=False, language_detection_segments=1)
+        except Exception as e:  # noqa: BLE001
+            log("덩어리 언어 감지 실패:", e)
+            return None
+        return lang if prob >= 0.6 else None
+
     def transcribe(self, pcm, a, b, lang):
+        if lang:
+            yield from self.transcribe_as(pcm, a, b, lang)
+            return
+        # 언어 자동: 말소리 덩어리마다 언어를 감지해 같은 언어가 이어지는 구간끼리 그 언어로 받아씀.
+        # 영상 전체를 한 언어로 고정하면 한국어 내레이션 + 일본어 대화처럼 섞인 영상에서 다른 언어 부분이
+        # 통째로 빠지거나 엉뚱한 글자로 바뀜. 첫 자막이 늦지 않도록 약 1분씩 나눠 처리
+        prev = self.lang_for(pcm, a, "")
+        if id(pcm) not in self.seen_langs:
+            self.seen_langs = {id(pcm): set()}  # 영상이 바뀌면 새로 (lang_cache 처럼 하나만 유지)
+        seen = self.seen_langs[id(pcm)]
+        pos = a
+        while pos < b:
+            # 말 사이 쉼으로 나뉜 덩어리 그대로 감지 (speech_chunks 처럼 가까운 덩어리를 합치면 언어 경계가 묻힘)
+            chunks = [c for c in speech_segments(pcm, pos, min(b, pos + 90)) if c[0] < pos + 60]
+            if not chunks:
+                pos = min(b, pos + 60)
+                yield [], pos, prev, self.name
+                continue
+            runs = self.language_runs(pcm, chunks, seen, prev)
+            prev = runs[-1][0]
+            for lg, r0, r1 in runs:
+                yield from self.transcribe_as(pcm, r0, r1, lg)
+            pos = max(pos + 1, chunks[-1][1])  # 문장이 창 경계에서 잘리지 않게 마지막 덩어리 끝에서 이어감
+
+    def language_runs(self, pcm, chunks, seen, prev):
+        """말소리 덩어리들의 언어를 감지해, 같은 언어가 이어지는 구간끼리 묶은 [언어, 시작, 끝] 목록.
+        언어를 모르는 덩어리(짧거나 확신 낮음)는 앞 덩어리 언어를 이어 씀. seen 에 나온 언어를 모음"""
+        detected = [(c0, c1, self.chunk_lang(pcm, c0, c1)) for c0, c1 in chunks]
+        seen.update(lg for *_, lg in detected if lg)
+        pieces = []
+        for c0, c1, lg in detected:
+            if len(seen) > 1 and c1 - c0 > 3:
+                # 섞인 영상이면 긴 덩어리 안에서도 언어가 바뀔 수 있어 짧은 쉼으로 더 잘게 나눠 다시 감지
+                # (한 언어 영상은 감지 횟수를 늘리지 않음: 1회 약 80ms)
+                subs = speech_segments(pcm, c0, c1, silence_ms=150, pad_ms=50) or [[c0, c1]]
+                pieces += [(s0, s1, self.chunk_lang(pcm, s0, s1) or lg) for s0, s1 in subs]
+            else:
+                pieces.append((c0, c1, lg))
+        runs = []
+        for c0, c1, lg in pieces:
+            lg = prev = lg or prev
+            if runs and runs[-1][0] == lg:
+                runs[-1][2] = c1
+            else:
+                runs.append([lg, c0, c1])
+        return runs
+
+    def transcribe_as(self, pcm, a, b, lang):
+        """[a,b) 를 lang 으로 받아씀. 자막마다 그 언어를 "l" 로 붙임 (확장 프로그램이 줄마다 번역할지 정할 때 씀)"""
         model = self.load()
-        lang = self.lang_for(pcm, a, lang)
         forced_cpu = False
+        a, b = float(a), float(b)  # numpy 실수면 결과 시각도 numpy 가 되어 JSON 으로 못 내보냄
         while True:
             try:
                 segments, info = model.transcribe(
@@ -162,11 +223,16 @@ class WhisperEngine:
                     vad_filter=True,
                     condition_on_previous_text=False,
                     beam_size=5,
-                    language=lang or None,
+                    language=lang,
                     initial_prompt=PROMPTS.get(lang),
                 )
                 for seg in segments:
-                    yield words_to_cues(seg.words or []), seg.end, info.language, "whisper"
+                    # Whisper 는 구간 끝을 넘어 받아쓰기도 함. 넘친 줄은 버림 (언어별로 나눈 구간에서 다음 구간의
+                    # 다른 언어 말을 이 언어로 잘못 받아쓴 것이라, 다음 구간이 제 언어로 다시 받아씀)
+                    cues = [c for c in words_to_cues(seg.words or []) if c["s"] < b - 0.2]
+                    for c in cues:
+                        c["l"] = lang
+                    yield cues, min(seg.end, b), info.language, self.name
                 return
             except Exception as e:  # noqa: BLE001
                 # GPU 추론 오류(드라이버/아키텍처 미지원 등)면 CPU로 한 번 재시도
@@ -179,14 +245,18 @@ class WhisperEngine:
                 model = self.load(force_cpu=True)
 
 
-def speech_chunks(pcm, a, b, max_sec):
-    """[a,b) 의 말소리 구간을 max_sec 이하 덩어리로 묶어 (시작, 끝) 초로 돌려줌 (Silero VAD)"""
+def speech_segments(pcm, a, b, max_sec=15.0, silence_ms=300, pad_ms=150):
+    """[a,b) 의 말소리 구간을 쉼 단위 그대로 (시작, 끝) 초로 돌려줌 (Silero VAD, 합치지 않음)"""
     seg = pcm[int(a * SR): int(b * SR)]
     # threshold 를 기본(0.5)보다 낮춤: 배경음악이 깔린 짧은 대사를 놓치지 않도록
-    opts = VadOptions(threshold=0.35, min_silence_duration_ms=300, speech_pad_ms=150, max_speech_duration_s=max_sec)
+    opts = VadOptions(threshold=0.35, min_silence_duration_ms=silence_ms, speech_pad_ms=pad_ms, max_speech_duration_s=max_sec)
+    return [[float(a + t["start"] / SR), float(a + t["end"] / SR)] for t in get_speech_timestamps(seg, opts)]
+
+
+def speech_chunks(pcm, a, b, max_sec):
+    """[a,b) 의 말소리 구간을 max_sec 이하 덩어리로 묶어 (시작, 끝) 초로 돌려줌 (가까운 말소리는 합침)"""
     chunks = []
-    for t in get_speech_timestamps(seg, opts):
-        s0, s1 = a + t["start"] / SR, a + t["end"] / SR
+    for s0, s1 in speech_segments(pcm, a, b, max_sec):
         if chunks and s1 - chunks[-1][0] <= max_sec and s0 - chunks[-1][1] < 0.6:
             chunks[-1][1] = s1  # 가까운 말소리는 한 덩어리로
         else:

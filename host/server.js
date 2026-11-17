@@ -60,7 +60,7 @@ const STYLES = {
   news: '뉴스 앵커처럼 또박또박하고 격식 있는 보도 말투로 번역합니다.',
   cute: '귀엽고 애교 있는 말투로, 말끝을 부드럽게 하거나 귀여운 어미를 써서 번역합니다.',
   pretty: '"예쁜 말"로 번역합니다. 부정적이거나 거칠고 공격적인 표현은 긍정적이고 부드러운 표현으로 바꿉니다 (비난·불평은 바람이나 부탁으로, 욕설·비속어는 순화해서, 단정적인 말은 배려하는 말로). 무슨 일이 있었는지 같은 사실은 바꾸지 않습니다.',
-  sexy: '나른하고 유혹하듯 은근한 말투로, 낮고 느긋하게 속삭이는 느낌이 나게 번역합니다. 노골적인 성적 표현은 쓰지 말고 분위기로만 표현합니다.',
+  sexy: '듣는 사람을 유혹하듯 끈적하고 섹시한 말투로 번역합니다. 상대에게 바로 말을 거는 듯한 반말("자기야", "너"), 늘어지는 말끝("~해애", "~할까아?", "~잖아…"), 숨 고르는 말줄임표("하아…", "음…"), 은근히 떠보거나 도발하는 말("나 보고 싶었지?", "그렇게 보면 곤란한데…") 중 하나 이상을 매 줄 넣어 분위기가 확 나게 하되, 같은 호칭이나 표현을 줄마다 되풀이하지 말고 골고루 바꿔 씁니다 (예: "오늘 매운 라면 먹어볼게요" → "오늘은… 매운 거 먹어볼까? 감당할 수 있겠어, 자기야?"). 노골적인 성적 표현은 쓰지 않고 말투와 뉘앙스로만 표현합니다.',
 };
 const styleOf = (s) => (Object.hasOwn(STYLES, s) ? s : 'natural');
 
@@ -363,8 +363,9 @@ function onSttEvent(ev, engine) {
   }
 }
 
-// 받아쓰기 캐시: <id>.<엔진>.<언어 또는 auto>.json
-const transcriptFile = (videoId, lang, engine) => path.join(TRANSCRIPT_DIR, `${videoId}.${engine}.${lang || 'auto'}.json`);
+// 받아쓰기 캐시: <id>.<엔진>.<언어 또는 auto2>.json
+// 언어 자동(auto2): 말소리 덩어리마다 언어를 감지하는 방식. 예전 auto 결과(영상 하나를 한 언어로 받아씀)는 다시 쓰지 않음
+const transcriptFile = (videoId, lang, engine) => path.join(TRANSCRIPT_DIR, `${videoId}.${engine}.${lang || 'auto2'}.json`);
 
 // lang: '' 이면 자동 감지, 아니면 언어 코드(예: 'en', 'ja')로 고정
 function sttStart(videoId, from, lang = '', engine = 'whisper') {
