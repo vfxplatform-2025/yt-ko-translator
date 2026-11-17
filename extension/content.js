@@ -8,7 +8,7 @@
   const LOOKAHEAD_SEC = 12 * 60; // 재생 위치보다 이만큼 앞까지만 번역 (구독 한도 절약)
   const MAX_TRIES = 3;
 
-  let settings = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
+  let settings = { enabled: true, fontSize: 32, subPos: 2, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
   // [音楽] / [Music] / ♪ 처럼 소리 설명만 있는 줄 (번역하지 않고 ♪ 로 표시)
   const TAG_ONLY = /^[\s\[\(（【〔<>-]*(音楽|音樂|拍手|笑い?|歓声|music|applause|laughter|laughs|cheering|음악|박수|웃음|♪|♫|♬|～|〜|~|\s)+[\]\)）】〕>\s.。♪♫♬～〜~-]*$/i;
   const baseLang = (l) => String(l || '').toLowerCase().split('-')[0];

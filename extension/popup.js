@@ -1,4 +1,4 @@
-const defaults = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
+const defaults = { enabled: true, fontSize: 32, subPos: 2, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
 const $ = (id) => document.getElementById(id);
 
 // 고를 수 있는 언어 (YouTube 자막 코드 / Whisper 코드와 앞부분이 같도록)

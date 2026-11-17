@@ -58,6 +58,15 @@
     return document.getElementById('movie_player');
   }
 
+  // 지금 유튜브 CC 가 켜져 있는지 (알 수 없으면 null)
+  function subtitlesOn(player) {
+    try {
+      if (player.isSubtitlesOn) return !!player.isSubtitlesOn();
+    } catch (_) {}
+    const btn = document.querySelector('#movie_player .ytp-subtitles-button');
+    return btn ? btn.getAttribute('aria-pressed') === 'true' : null;
+  }
+
   function getPlayerResponse(videoId) {
     const p = getPlayer();
     let pr = p && p.getPlayerResponse && p.getPlayerResponse();
@@ -126,9 +135,12 @@
       if (events && events.length) return { ...base, events };
     } catch (_) {}
 
-    // 3) 플레이어의 자막(CC)을 켜서 플레이어가 직접 요청하게 만든 뒤 가로채기
+    // 3) 플레이어의 자막(CC)을 켜서 플레이어가 직접 요청하게 만든 뒤 가로채기.
+    //    유튜브는 CC 를 켜면 "자막 켜기"를 사용자 설정으로 기억해 다른 영상에서도 CC 가 켜지므로,
+    //    원래 꺼져 있었으면 가로챈 뒤(실패해도) 다시 끈다.
     const player = getPlayer();
     if (player) {
+      const wasOn = subtitlesOn(player);
       try {
         if (player.loadModule) player.loadModule('captions');
         if (player.setOption) {
@@ -138,9 +150,17 @@
         }
         if (player.toggleSubtitlesOn) player.toggleSubtitlesOn();
       } catch (_) {}
-      for (let i = 0; i < 30; i++) {
-        if ((got = findCaptured(videoId, track))) return { ...base, events: got };
-        await sleep(300);
+      try {
+        for (let i = 0; i < 30; i++) {
+          if ((got = findCaptured(videoId, track))) return { ...base, events: got };
+          await sleep(300);
+        }
+      } finally {
+        if (wasOn === false) {
+          try {
+            if (subtitlesOn(player) && player.toggleSubtitles) player.toggleSubtitles();
+          } catch (_) {}
+        }
       }
     }
     throw new Error('자막 데이터를 가져오지 못했습니다');

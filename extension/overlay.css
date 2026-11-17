@@ -3,7 +3,7 @@
   left: 0;
   right: 0;
   /* 위치는 팝업의 "자막 위치"(--ytko-bottom). 컨트롤 바가 보일 때는 그 위로 올림 */
-  bottom: var(--ytko-bottom, 9%);
+  bottom: var(--ytko-bottom, 2%);
   transition: bottom 0.2s;
   z-index: 60;
   display: flex;
@@ -140,5 +140,5 @@ html.ytko-active .ytp-caption-window-container {
 
 /* 플레이어 컨트롤 바가 나타나 있을 때(마우스 올림/일시정지) 자막이 가려지지 않게 그 높이만큼 올림 */
 .html5-video-player:not(.ytp-autohide) #ytko-overlay {
-  bottom: calc(var(--ytko-bottom, 9%) + 56px);
+  bottom: calc(var(--ytko-bottom, 2%) + 56px);
 }
