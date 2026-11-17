@@ -8,7 +8,16 @@ cd /d "%~dp0"
 echo == 1) 필수 프로그램 확인 ==
 set MISSING=
 where node >nul 2>nul || (echo [없음] node 18 이상: https://nodejs.org 에서 설치& set MISSING=1)
-where codex >nul 2>nul || (echo [없음] codex CLI: npm install -g @openai/codex 후 codex login 으로 ChatGPT 로그인& set MISSING=1)
+rem 번역 엔진: codex(ChatGPT 구독) 또는 Claude Code(Claude 구독) 중 하나 이상 (팝업에서 고름)
+set HAVE_TR=
+where codex >nul 2>nul && set HAVE_TR=1
+where claude >nul 2>nul && set HAVE_TR=1
+if not defined HAVE_TR (
+  echo [없음] 번역 엔진. 둘 중 하나 이상 설치 후 로그인:
+  echo        ChatGPT: npm install -g @openai/codex 후 codex login
+  echo        Claude : https://claude.com/claude-code 에서 Claude Code 설치 후 claude 실행해 로그인
+  set MISSING=1
+)
 if defined MISSING (
   echo.
   echo 위 항목을 먼저 설치한 뒤 이 스크립트를 다시 실행하세요.

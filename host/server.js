@@ -6,13 +6,14 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const { spawn } = require('child_process');
-const { CodexSession } = require('./codex_session');
+const { CodexSession, killTree } = require('./codex_session');
 
 const IS_WIN = process.platform === 'win32';
 const PORT = Number(process.env.PORT || 17891);
 const MODEL = process.env.CODEX_MODEL || ''; // 비우면 codex 기본 모델 사용
 const EFFORT = process.env.CODEX_EFFORT || 'low'; // none 이 약 20% 빠르지만 번역 품질은 low 가 나음
 const CODEX_BIN = process.env.CODEX_BIN || 'codex';
+const CLAUDE_BIN = process.env.CLAUDE_BIN || 'claude';
 const MAX_CONCURRENT = Number(process.env.MAX_CONCURRENT || 3);
 const TIMEOUT_MS = 120000;
 const WORKDIR = fs.mkdtempSync(path.join(os.tmpdir(), 'yt-ko-'));
@@ -63,27 +64,52 @@ ${JSON.stringify(input)}`;
 // ---------------- 상주 codex 세션 ----------------
 // 번역 버튼을 켠 탭(holder)이 하나라도 있으면 유지. 끄기 요청이 없더라도(탭 닫힘 등) 신호가 끊기면 자동 종료.
 const codex = new CodexSession({ bin: CODEX_BIN, cwd: WORKDIR, model: MODEL, effort: EFFORT, log: (...a) => console.log(...a) });
-const holders = new Map(); // holder id -> 마지막 신호 시각
+const holders = new Map(); // holder id -> { at: 마지막 신호 시각, translator: 그 탭이 고른 번역 엔진 }
 const HOLDER_TTL_MS = 3 * 60 * 1000; // 확장 프로그램은 1분마다 ping
 
-// 번역 버튼을 켠 탭이 하나도 없으면 codex 와 음성 인식 워커(GPU 메모리)를 함께 내림.
-// 중단된 받아쓰기 작업은 error 상태가 되고, 다시 켜면 startStt 가 재시작함.
+// 번역 버튼을 켠 탭 중 codex 를 쓰는 탭이 없으면 상주 codex 를 내리고,
+// 켠 탭이 하나도 없으면 음성 인식 워커(GPU 메모리)도 내림. 중단된 받아쓰기는 다시 켜면 이어서 진행.
 function releaseIfIdle() {
+  if (![...holders.values()].some((h) => h.translator === 'codex')) codex.stop();
   if (holders.size) return;
-  codex.stop();
   for (const [engine, p] of sttProcs) {
     console.log(`[stt:${engine}] 번역이 모두 꺼져 워커를 종료합니다`);
     try { p.kill(); } catch (_) {}
   }
 }
 
+// ---------------- 번역 엔진: codex(ChatGPT 구독) 또는 Claude(Claude 구독). 팝업에서 고름 ----------------
+const TRANSLATORS = ['codex', 'claude-sonnet', 'claude-haiku'];
+const binOf = (t) => (t.startsWith('claude-') ? CLAUDE_BIN : CODEX_BIN);
+
+// 실행 파일이 있는지 — 요청 처리 중에 기다리지 않도록 백그라운드에서 확인해 두고 그 값을 씀 (시작 때 + 1분마다)
+const binOk = new Map(); // bin -> true/false (확인 전에는 없음 = 있다고 봄)
+function probeBin(bin) {
+  const child = spawn(bin, ['--version'], { shell: IS_WIN, windowsHide: true, stdio: 'ignore' });
+  const timer = setTimeout(() => killTree(child), 15000);
+  child.on('error', () => { clearTimeout(timer); binOk.set(bin, false); });
+  child.on('close', (code) => { clearTimeout(timer); binOk.set(bin, code === 0); });
+}
+const probeAll = () => [CODEX_BIN, CLAUDE_BIN].forEach(probeBin);
+probeAll();
+const translatorReady = (t) => binOk.get(binOf(t)) !== false;
+const readyTranslators = () => ({ codex: translatorReady('codex'), claude: translatorReady('claude-sonnet') });
+
+// 고른 엔진이 이 PC에 없으면 설치된 다른 엔진으로 대신 (설정은 PC 사이에 동기화되므로)
+function translatorOf(t) {
+  t = TRANSLATORS.includes(t) ? t : 'codex';
+  if (translatorReady(t)) return t;
+  return TRANSLATORS.find(translatorReady) || t;
+}
+
 setInterval(() => {
   const now = Date.now();
-  for (const [id, at] of holders) if (now - at > HOLDER_TTL_MS) holders.delete(id);
+  for (const [id, h] of holders) if (now - h.at > HOLDER_TTL_MS) holders.delete(id);
   releaseIfIdle();
 }, 30000).unref();
+setInterval(probeAll, 60000).unref();
 
-async function session(action, id) {
+async function session(action, id, translator = 'codex') {
   if (!/^[A-Za-z0-9_-]{4,64}$/.test(id)) throw new Error('bad id');
   if (action === 'stop') {
     holders.delete(id);
@@ -91,12 +117,43 @@ async function session(action, id) {
     return;
   }
   if (action !== 'start' && action !== 'ping') throw new Error('bad action');
-  holders.set(id, Date.now());
-  if (action === 'start') await codex.start(); // 미리 띄워 두어 첫 번역부터 빠르게
+  const t = translatorOf(translator) === 'codex' ? 'codex' : 'claude';
+  holders.set(id, { at: Date.now(), translator: t });
+  releaseIfIdle(); // Claude 로 바꿨으면 더는 쓰지 않는 상주 codex 를 내림
+  // codex 는 미리 띄워 두어 첫 번역부터 빠르게 (Claude 는 요청마다 실행해도 빨라서 상주시키지 않음)
+  if (action === 'start' && t === 'codex') await codex.start();
 }
 
-function runCodex(prompt) {
+function runTranslator(prompt, translator) {
+  if (translator.startsWith('claude-')) return runClaude(prompt, translator.slice('claude-'.length));
   return codex.running ? codex.ask(prompt, TIMEOUT_MS) : runCodexExec(prompt);
+}
+
+// Claude Code CLI 한 번 실행 (구독 로그인 사용). --safe-mode 로 사용자 설정(훅·MCP·CLAUDE.md·플러그인)을 끄고,
+// 도구 없이 번역만 하게 한다. 10줄 번역 기준 Sonnet 약 4초, Haiku 약 3.6초.
+// 모델은 엔진별 환경변수로 바꿀 수 있음: CLAUDE_MODEL_SONNET, CLAUDE_MODEL_HAIKU (기본: 별칭 sonnet / haiku)
+const CLAUDE_SYSTEM = 'You are a subtitle translator. Follow the user instructions exactly and reply with only the requested JSON.';
+function runClaude(prompt, model) {
+  return new Promise((resolve, reject) => {
+    const q = IS_WIN ? (s) => `"${s}"` : (s) => s;
+    const args = ['-p', '--safe-mode', '--strict-mcp-config', '--tools', q(''), '--no-session-persistence',
+      '--model', process.env[`CLAUDE_MODEL_${model.toUpperCase()}`] || model, '--system-prompt', q(CLAUDE_SYSTEM)];
+    const child = spawn(CLAUDE_BIN, args, { shell: IS_WIN, windowsHide: true, cwd: WORKDIR });
+    let out = '';
+    let err = '';
+    let done = false;
+    const finish = (fn, v) => { if (!done) { done = true; clearTimeout(timer); fn(v); } };
+    const timer = setTimeout(() => { killTree(child); finish(reject, new Error('claude 시간 초과')); }, TIMEOUT_MS);
+    child.stdout.on('data', (d) => { out += d; });
+    child.stderr.on('data', (d) => { err += d; });
+    child.on('error', (e) => finish(reject, e));
+    child.on('close', (code) => {
+      // 로그인 안 됨·사용량 초과 등은 그 안내문을 stdout 에 쓰고 0이 아닌 코드로 끝남 — 그 문구를 그대로 오류로
+      if (code !== 0) return finish(reject, new Error(`claude 오류: ${(out.trim() || err.trim()).slice(-300) || `종료 코드 ${code}`}`));
+      finish(resolve, out);
+    });
+    child.stdin.end(prompt);
+  });
 }
 
 function runCodexExec(prompt) {
@@ -116,7 +173,7 @@ function runCodexExec(prompt) {
     const timer = setTimeout(() => {
       if (done) return;
       done = true;
-      child.kill();
+      killTree(child);
       reject(new Error('codex 시간 초과'));
     }, TIMEOUT_MS);
     child.stderr.on('data', (d) => { stderr += d; });
@@ -149,12 +206,13 @@ async function translate(body) {
   const lines = body.lines;
   const expected = lines.map((l) => l.i);
   const prompt = buildPrompt(body);
+  const translator = translatorOf(body.translator);
   await acquire();
   try {
     let lastErr;
     for (let attempt = 0; attempt < 2; attempt++) {
       try {
-        const text = await runCodex(prompt);
+        const text = await runTranslator(prompt, translator);
         const { map, missing } = parseResult(text, expected);
         if (missing.length === 0 || attempt === 1) {
           return lines.map((l) => ({ i: l.i, t: map.get(l.i) ?? '' }));
@@ -352,7 +410,7 @@ const server = http.createServer((req, res) => {
     return send(res, 403, { error: 'forbidden origin' });
   }
   if (req.method === 'GET' && req.url === '/health') {
-    return send(res, 200, { ok: true, stt: engineReady('whisper'), engines: readyEngines(), codex: codex.running });
+    return send(res, 200, { ok: true, stt: engineReady('whisper'), engines: readyEngines(), translators: readyTranslators(), codex: codex.running });
   }
   if (req.method === 'GET' && req.url.startsWith('/stt/poll')) {
     const u = new URL(req.url, 'http://127.0.0.1');
@@ -382,7 +440,7 @@ const ROUTES = {
     limit: 1e3,
     handle: async (b) => {
       try {
-        await session(String(b.action || ''), String(b.id || ''));
+        await session(String(b.action || ''), String(b.id || ''), String(b.translator || 'codex'));
       } catch (e) {
         throw httpError(e.message.startsWith('bad ') ? 400 : 500, e.message);
       }
@@ -401,7 +459,8 @@ const ROUTES = {
     handle: async (body) => {
       if (!Array.isArray(body.lines) || body.lines.length === 0 || body.lines.length > 300) throw httpError(400, 'lines 형식 오류');
       const t0 = Date.now();
-      const via = codex.running ? '상주' : 'exec';
+      const translator = translatorOf(body.translator);
+      const via = translator !== 'codex' ? translator : codex.running ? 'codex 상주' : 'codex exec';
       let result;
       try {
         result = await translate(body);

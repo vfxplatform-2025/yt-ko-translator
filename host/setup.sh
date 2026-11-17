@@ -13,12 +13,15 @@ if ! command -v node >/dev/null 2>&1; then
 else
   echo "[OK] node $(node --version)"
 fi
-if ! command -v codex >/dev/null 2>&1; then
-  echo "[없음] codex CLI. 설치 후 'codex login' 으로 ChatGPT 로그인:"
-  echo "       sudo npm install -g @openai/codex   (또는 npm config set prefix ~/.npm-global 후 -g 없이 사용자 설치)"
+# 번역 엔진: codex(ChatGPT 구독) 또는 Claude Code(Claude 구독) 중 하나 이상 (팝업에서 고름)
+have_tr=0
+if command -v codex >/dev/null 2>&1; then echo "[OK] codex $(codex --version 2>/dev/null | head -1)"; have_tr=1; fi
+if command -v claude >/dev/null 2>&1; then echo "[OK] claude $(claude --version 2>/dev/null | head -1)"; have_tr=1; fi
+if [ "$have_tr" = "0" ]; then
+  echo "[없음] 번역 엔진. 둘 중 하나 이상 설치 후 로그인:"
+  echo "       ChatGPT: sudo npm install -g @openai/codex && codex login"
+  echo "       Claude : curl -fsSL https://claude.ai/install.sh | bash && claude   (처음 실행 때 로그인)"
   missing=1
-else
-  echo "[OK] codex $(codex --version 2>/dev/null | head -1)"
 fi
 if [ "$missing" = "1" ]; then
   echo
@@ -56,4 +59,4 @@ print("yt-dlp", yt_dlp.version.__version__)
 print("CUDA 장치 수:", ctranslate2.get_cuda_device_count())
 PY
 echo
-echo "완료. 'codex login status' 로 로그인 상태를 확인한 뒤 ./start.sh 로 호스트를 실행하세요."
+echo "완료. 번역 엔진 로그인(codex login 또는 claude)을 확인한 뒤 ./start.sh 로 호스트를 실행하세요."

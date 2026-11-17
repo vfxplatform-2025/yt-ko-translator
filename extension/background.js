@@ -26,7 +26,7 @@ chrome.runtime.onMessage.addListener((msg, _sender, sendResponse) => {
   let p;
   if (msg.type === 'translate') p = call('/translate', msg.body, TRANSLATE_TIMEOUT_MS);
   else if (msg.type === 'health') p = call('/health', null, 5000);
-  else if (msg.type === 'session') p = call('/session', { action: msg.action, id: msg.id }, 20000);
+  else if (msg.type === 'session') p = call('/session', { action: msg.action, id: msg.id, translator: msg.translator || 'codex' }, 20000);
   else if (msg.type === 'stt-start') p = call('/stt/start', { videoId: msg.videoId, from: msg.from, lang: msg.lang || '', engine: msg.engine || 'whisper' });
   else if (msg.type === 'stt-poll') {
     const q = new URLSearchParams({ videoId: msg.videoId, lang: msg.lang || '', engine: msg.engine || 'whisper', since: String(Number(msg.since) || 0) });

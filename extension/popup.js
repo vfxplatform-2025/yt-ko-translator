@@ -1,4 +1,4 @@
-const defaults = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', sourceLang: 'auto', targetLang: 'ko' };
+const defaults = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
 const $ = (id) => document.getElementById(id);
 
 // 고를 수 있는 언어 (YouTube 자막 코드 / Whisper 코드와 앞부분이 같도록)
@@ -19,7 +19,7 @@ fill($('targetLang'), false);
 
 // 설정 칸: id 가 저장 키와 같음
 const TOGGLES = ['enabled', 'sttEnabled', 'preferStt', 'showOriginal'];
-const SELECTS = ['sourceLang', 'targetLang', 'sttEngine'];
+const SELECTS = ['sourceLang', 'targetLang', 'sttEngine', 'translator'];
 chrome.storage.sync.get(defaults, (s) => {
   for (const k of TOGGLES) $(k).checked = s[k];
   for (const k of SELECTS) $(k).value = s[k];
@@ -51,12 +51,23 @@ function checkHost() {
       $('hostText').textContent = r.stt ? '호스트 연결됨' : '연결됨 · 음성 인식 없음';
       el.title = r.stt ? '번역 + 음성 인식 사용 가능' : 'host/.venv 가 없어 음성 인식을 쓸 수 없습니다';
       el.classList.add('ok');
-      // 설치되지 않은 음성 인식 모델은 고를 수 없게
-      for (const o of $('sttEngine').options) {
-        const ok = !r.engines || r.engines[o.value];
-        o.disabled = !ok;
-        o.textContent = o.textContent.replace(/ \(미설치\)$/, '') + (ok ? '' : ' (미설치)');
-      }
+      // 설치되지 않은 음성 인식 모델·번역 엔진은 고를 수 없게
+      // 저장된 선택이 이 PC에 없는 것이면 설치된 첫 항목으로 바꿔 저장 (설정은 PC 사이에 동기화되므로)
+      const mark = (sel, ready, keyOf) => {
+        for (const o of sel.options) {
+          const ok = !ready || ready[keyOf(o.value)];
+          o.disabled = !ok;
+          o.textContent = o.textContent.replace(/ \(미설치\)$/, '') + (ok ? '' : ' (미설치)');
+        }
+        const cur = sel.options[sel.selectedIndex];
+        const first = [...sel.options].find((o) => !o.disabled);
+        if (cur && cur.disabled && first) {
+          sel.value = first.value;
+          chrome.storage.sync.set({ [sel.id]: first.value });
+        }
+      };
+      mark($('sttEngine'), r.engines, (v) => v);
+      mark($('translator'), r.translators, (v) => v.split('-')[0]);
     } else {
       $('hostText').textContent = '호스트 꺼짐';
       el.title = 'Linux: systemctl --user status yt-ko / Windows: start.bat';

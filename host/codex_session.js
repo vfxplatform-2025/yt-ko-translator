@@ -3,6 +3,17 @@
 const { spawn } = require('child_process');
 
 const IS_WIN = process.platform === 'win32';
+
+// 하위 프로세스까지 종료. Windows 에서 shell 로 띄운 프로세스는 kill() 하면 cmd.exe 만 끝나고
+// 실제 프로그램(codex/claude)은 남으므로 taskkill /T 로 트리 전체를 끈다.
+function killTree(child) {
+  if (!child || child.exitCode !== null) return;
+  if (IS_WIN && child.pid) {
+    spawn('taskkill', ['/pid', String(child.pid), '/T', '/F'], { windowsHide: true, stdio: 'ignore' }).on('error', () => {});
+  } else {
+    try { child.kill(); } catch (_) {}
+  }
+}
 // codex 에이전트의 긴 기본 지시문/도구 설명 대신 쓰는 짧은 지시문 (입력 토큰을 줄여 응답이 빨라짐)
 const BASE_INSTRUCTIONS =
   'You are a subtitle translator. Follow the user instructions exactly and reply with only the requested JSON. Never use tools.';
@@ -63,7 +74,7 @@ class CodexSession {
     const proc = this.proc;
     this.proc = null;
     this.ready = null;
-    try { proc.kill(); } catch (_) {}
+    killTree(proc);
     this.log('[codex] 상주 세션 종료');
   }
 
@@ -129,4 +140,4 @@ class CodexSession {
   }
 }
 
-module.exports = { CodexSession };
+module.exports = { CodexSession, killTree };

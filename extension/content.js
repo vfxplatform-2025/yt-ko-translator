@@ -8,7 +8,7 @@
   const LOOKAHEAD_SEC = 12 * 60; // 재생 위치보다 이만큼 앞까지만 번역 (구독 한도 절약)
   const MAX_TRIES = 3;
 
-  let settings = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', sourceLang: 'auto', targetLang: 'ko' };
+  let settings = { enabled: true, fontSize: 26, subPos: 9, showOriginal: false, sttEnabled: true, preferStt: false, sttEngine: 'whisper', translator: 'codex', sourceLang: 'auto', targetLang: 'ko' };
   // [音楽] / [Music] / ♪ 처럼 소리 설명만 있는 줄 (번역하지 않고 ♪ 로 표시)
   const TAG_ONLY = /^[\s\[\(（【〔<>-]*(音楽|音樂|拍手|笑い?|歓声|music|applause|laughter|laughs|cheering|음악|박수|웃음|♪|♫|♬|～|〜|~|\s)+[\]\)）】〕>\s.。♪♫♬～〜~-]*$/i;
   const baseLang = (l) => String(l || '').toLowerCase().split('-')[0];
@@ -40,7 +40,11 @@
     applySettings();
     lastShown = null;
     if ('enabled' in changes && !settings.enabled) setActive(false);
-    else if (active && ['sttEnabled', 'preferStt', 'sttEngine', 'sourceLang', 'targetLang'].some((k) => k in changes)) start();
+    else if (active && ['sttEnabled', 'preferStt', 'sttEngine', 'translator', 'sourceLang', 'targetLang'].some((k) => k in changes)) {
+      // 번역 엔진을 바꾸면 호스트에 알리고(codex 면 미리 띄움, Claude 면 상주 codex 를 내림) 새 엔진으로 처음부터 번역
+      if ('translator' in changes) send({ type: 'session', action: 'start', id: sessionId, translator: settings.translator });
+      start();
+    }
     ensureButton();
   });
   function applySettings() {
@@ -212,8 +216,8 @@
   }
 
   // ---------- 캐시 (영상별 번역 결과) ----------
-  // 번역 캐시는 영상 + 원문(자막 트랙 또는 음성 인식) + 번역 언어별로 따로 저장
-  const cacheKey = (s) => `tr:${s.videoId}:${s.srcKey}:${s.target}`;
+  // 번역 캐시는 영상 + 원문(자막 트랙 또는 음성 인식) + 번역 언어 + 번역 엔진별로 따로 저장
+  const cacheKey = (s) => `tr:${s.videoId}:${s.srcKey}:${s.target}:${s.translator}`;
   function loadCache(s) {
     return new Promise((resolve) => {
       const k = cacheKey(s);
@@ -252,7 +256,7 @@
     const source = settings.sourceLang || 'auto';
     const target = settings.targetLang || 'ko';
     const s = {
-      videoId, source, target, cues: [], keys: new Set(), tcache: {}, running: 0, timers: [], dead: false,
+      videoId, source, target, translator: settings.translator || 'codex', cues: [], keys: new Set(), tcache: {}, running: 0, timers: [], dead: false,
       title: '', channel: '', lastTime: 0, mode: 'captions', srcKey: '', srcLang: '',
       sttLang: '', sttEngine: settings.sttEngine || 'whisper', sttSince: 0, sttDone: false, sttMsg: '', sttState: '', sttProg: null, sttPolling: false, lastSeekStart: 0,
       fatal: '', hostErr: '', blockedUntil: 0,
@@ -473,7 +477,7 @@
     const idx = s.cues.indexOf(batch[0]);
     const context = s.cues.slice(Math.max(0, idx - CTX), idx).map((c) => c.o).join('\n');
     // 응답 시간 제한은 background.js 의 fetch 에서 (요청 자체를 취소)
-    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target } });
+    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang: s.srcLang, targetLang: s.target, translator: s.translator } });
     s.running--;
     if (s.dead || s !== st) return;
     if (res.ok) {
@@ -608,8 +612,8 @@
     active = on;
     clearInterval(pingTimer);
     if (on) {
-      send({ type: 'session', action: 'start', id: sessionId });
-      pingTimer = setInterval(() => send({ type: 'session', action: 'ping', id: sessionId }), 60000);
+      send({ type: 'session', action: 'start', id: sessionId, translator: settings.translator });
+      pingTimer = setInterval(() => send({ type: 'session', action: 'ping', id: sessionId, translator: settings.translator }), 60000);
       start();
     } else {
       stop();

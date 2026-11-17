@@ -1,6 +1,6 @@
 # YouTube AI 자막 번역 (개인용)
 
-유튜브 영상의 자막(또는 음성)을 로컬 `codex` CLI(ChatGPT 로그인)로 원하는 언어(기본 한국어)로 자연스럽게 번역해 영상 위에 오버레이로 보여줍니다.
+유튜브 영상의 자막(또는 음성)을 로컬 `codex` CLI(ChatGPT 로그인) 또는 Claude Code(Claude 로그인)로 원하는 언어(기본 한국어)로 자연스럽게 번역해 영상 위에 오버레이로 보여줍니다.
 
 ## 구성
 - `host/server.js` — 로컬 서버 (127.0.0.1:17891). 번역은 codex, 음성 인식은 `stt_worker.py`에 위임
@@ -11,7 +11,7 @@
 - `extension/` — Chrome 확장 프로그램 (MV3)
 
 ## Windows에서 사용 (음성 인식은 Whisper 만)
-1. Node 18+ 와 codex CLI 설치 후 `codex login` (ChatGPT 로그인): `npm install -g @openai/codex`
+1. Node 18+ 와 번역 엔진 하나 이상: ChatGPT 구독이면 `npm install -g @openai/codex` 후 `codex login`, Claude 구독이면 Claude Code 설치 후 `claude` 를 한 번 실행해 로그인
 2. 최초 1회: `host\setup.bat` 실행 — `host\.venv`(Python 3.12)에 yt-dlp, faster-whisper 등을 설치
    (NVIDIA GPU가 있으면 CUDA 라이브러리까지, 없으면 CPU 모드)
 3. 실행: `host\start.bat` (창을 띄워 둠)
@@ -69,6 +69,15 @@
 - 자막은 글자 수에 맞춰 읽을 시간(1.5~8초)만큼 표시, 한 번에 한 줄. 위치는 팝업의 "자막 위치"(화면 아래에서 0~30%),
   플레이어 컨트롤 바가 보일 때는 그 위로 자동으로 올라감
 - 번역 결과는 영상별로 브라우저에, 받아쓰기 결과는 `host/cache/transcripts`에 캐시
+
+## 번역 엔진 (팝업에서 선택, 기본 ChatGPT)
+| 엔진 | 필요한 것 | 비고 |
+|---|---|---|
+| ChatGPT (codex) | ChatGPT 구독 + `codex login` | 번역 버튼을 켜 둔 동안 상주시켜 빠르게 |
+| Claude Sonnet / Haiku | Claude 구독 + Claude Code 로그인 | 요청마다 `claude -p --safe-mode` 실행 (사용자 설정·훅·MCP 끔). 2줄 기준 2.4~2.7초 |
+- 번역 사용량은 각 구독 한도에서 차감됩니다. Claude 모델을 직접 지정하려면 `CLAUDE_MODEL_SONNET` / `CLAUDE_MODEL_HAIKU`, 실행 파일 경로는 `CLAUDE_BIN`.
+- 이 PC에 없는 엔진을 고르면(설정이 다른 PC에서 동기화된 경우 등) 설치된 다른 엔진으로 대신하고, 팝업도 설치된 엔진으로 바꿉니다.
+- 엔진을 바꾸면 그 영상은 새 엔진으로 처음부터 다시 번역합니다 (번역 캐시는 엔진별).
 
 ## 음성 인식 모델 (팝업에서 선택, 기본 Whisper)
 | 모델 | 언어 | 특징 |
