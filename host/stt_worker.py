@@ -106,6 +106,46 @@ class W:  # 단어 하나 (words_to_cues 입력)
 PROMPTS = {"ja": "以下は、日本語の会話の書き起こしです。", "zh": "以下是普通话的句子。"}
 
 
+def _norm(text):
+    """비교용: 글자·숫자만 남기고 소문자로"""
+    return "".join(ch for ch in text.lower() if ch.isalnum())
+
+
+def prompt_leaked(text, prompt):
+    """받아쓴 글에 시작 문장 일부(5글자 이상)가 그대로 나왔는지"""
+    t, p = _norm(text), _norm(prompt)
+    return any(t[i: i + 5] in p for i in range(len(t) - 4))
+
+
+# 말이 없거나 음악만 있을 때 Whisper 가 지어내는 대표적인 문장 (이것만 있는 줄은 버림)
+HALLUCINATIONS = {_norm(s) for s in (
+    "시청해주셔서 감사합니다", "시청해 주셔서 감사합니다", "구독과 좋아요 부탁드립니다", "MBC 뉴스 이덕영입니다", "날씨였습니다",
+    "ご視聴ありがとうございました", "ご視聴ありがとうございます", "チャンネル登録お願いします",
+    "Thanks for watching", "Thank you for watching", "Please subscribe",
+)}
+
+
+def is_hallucination(cue):
+    """지어낸 줄: 대표 문장이거나, 노래·음악 구간에서 글자 한두 개를 몇 초씩 늘인 줄 (예: "予" 가 8초)"""
+    t = _norm(cue["o"])
+    dur = cue["e"] - cue["s"]
+    return t in HALLUCINATIONS or (dur > 2.5 and len(t) < dur * 0.8)
+
+
+def script_lang(text):
+    """글자로 확실히 알 수 있는 언어 ('ja' / 'ko'), 모르면 ''. 가나가 있고 일본어 글자(가나·한자)가 한글보다 많으면
+    일본어 (한국어로 잘못 받아쓰면 일본어 사이에 "날씨였습니다" 같은 한국어가 끼기도 함), 글자 절반 이상이 한글이면 한국어"""
+    letters = [ch for ch in text if ch.isalpha()]
+    kana = sum(0x3040 <= ord(ch) <= 0x30FF for ch in letters)
+    han = sum(0x4E00 <= ord(ch) <= 0x9FFF for ch in letters)
+    hangul = sum(0xAC00 <= ord(ch) <= 0xD7A3 or 0x3130 <= ord(ch) <= 0x318F for ch in letters)
+    if kana and kana + han > hangul:
+        return "ja"
+    if letters and hangul * 2 >= len(letters):
+        return "ko"
+    return ""
+
+
 class WhisperEngine:
     name = "whisper"
 
@@ -161,9 +201,74 @@ class WhisperEngine:
             return None
         return lang if prob >= 0.6 else None
 
+    def transcribe_pieces(self, pcm, a, b, lang):
+        """[a,b) 를 말소리 기준 20초 이하 조각으로 나눠 lang 으로 받아씀. 30초 넘게 한 번에 받아쓰면 Whisper 가
+        중간 대사를 통째로 빠뜨리거나 시각이 밀림 (예: 726~760초를 한 번에 하면 743~755초 대사가 사라짐).
+        조각마다 바로 내보내서 첫 줄도 빨리 나옴"""
+        segs = speech_segments(pcm, a, b)
+        prev_end = a
+        for g0, g1 in group_segments(segs, 20.0):
+            # 말소리 사이 빈 시간도 앞쪽 8초까지는 같이 넘김: 배경음악에 묻힌 작은 대사는 말소리 감지에서 빠지지만
+            # Whisper 는 앞뒤 문맥과 함께 들으면 받아씀 (예: 688초 "つ、ツッポがある")
+            p0, p1 = max(prev_end, g0 - 8.0), g1
+            prev_end = p1
+            cues, lg = self.check_script(pcm, p0, p1, lang)
+            cues += self.fill_missed(pcm, segs, p0, p1, lg, cues)
+            cues = self.fill_sparse(pcm, p0, p1, lg, cues)
+            yield sorted(cues, key=lambda c: c["s"]), p1, lg, self.name
+        yield [], b, lang, self.name  # 끝까지 처리했음을 알림 (말소리 없는 꼬리 구간 포함)
+
+    def cues_as(self, pcm, a, b, lang):
+        return [c for cues, *_ in self.transcribe_as(pcm, a, b, lang) for c in cues]
+
+    def check_script(self, pcm, a, b, lang):
+        """[a,b) 를 lang 으로 받아쓰고 (자막, 실제 언어). 언어 감지가 틀리는 경우가 있어 (배경음악 깔린 일본어를
+        한국어 100% 로 감지하는 등) 받아쓴 글자가 다른 언어의 문자면 그 언어로 다시 받아씀"""
+        cues = self.cues_as(pcm, a, b, lang)
+        real = script_lang("".join(c["o"] for c in cues))
+        if not real or real == lang:
+            return cues, lang
+        log(f"[{a:.1f}-{b:.1f}] {lang} 로 감지했지만 받아쓴 글자는 {real} -> {real} 로 다시 받아씀")
+        again = self.cues_as(pcm, a, b, real)
+        if not again:  # 다시 받아쓴 결과가 비면 처음 글을 그 언어로 씀 (글자는 이미 맞는 언어)
+            for c in cues:
+                c["l"] = real
+        return again or cues, real
+
+    def fill_missed(self, pcm, segs, a, b, lang, cues):
+        """Whisper 는 "ご視聴ありがとうございました" 같은 말을 지어낸 뒤 조각의 나머지를 통째로 건너뛰기도 함.
+        [a,b) 의 말소리 중 자막이 걸치지 않은 부분(1초 이상)만 다시 받아써서 새 줄들을 돌려줌"""
+        missed = [m for s in segs if a <= s[0] < b for m in uncovered(s, cues) if m[1] - m[0] >= 1.0]
+        more = []
+        for m0, m1 in group_segments(missed, 10.0):
+            got = [c for c in self.cues_as(pcm, m0, m1, lang) if not repeats(c, cues)]
+            if got:
+                log(f"[{m0:.1f}-{m1:.1f}] 빠진 말소리를 다시 받아씀: {len(got)}줄")
+            more += got
+        return more
+
+    def fill_sparse(self, pcm, a, b, lang, cues):
+        """시간에 비해 글자가 너무 적은 한·중·일 줄은 앞 문장을 빠뜨린 것 (예: 748~755초 두 문장 중 뒤 문장만
+        6.5초짜리 줄로). 그 줄 구간만 다시 받아써서 글이 더 많이 나오면 바꿈"""
+        out = []
+        for c in cues:
+            dur, n = c["e"] - c["s"], len(_norm(c["o"]))
+            if dur > 3 and n < dur * 3 and is_cjk(c["o"]):
+                again = self.cues_as(pcm, max(a, c["s"] - 0.3), min(b, c["e"] + 0.3), lang)
+                if len(_norm("".join(x["o"] for x in again))) > n * 1.3:
+                    log(f"[{c['s']:.1f}-{c['e']:.1f}] 글자가 적은 줄을 다시 받아씀: {len(again)}줄")
+                    out += again
+                    continue
+            out.append(c)
+        return out
+
     def transcribe(self, pcm, a, b, lang):
         if lang:
-            yield from self.transcribe_as(pcm, a, b, lang)
+            pos = a
+            while pos < b:  # 영상 전체를 한꺼번에 VAD 하지 않도록 1분씩
+                end = min(b, pos + 60)
+                yield from self.transcribe_pieces(pcm, pos, end, lang)
+                pos = end
             return
         # 언어 자동: 말소리 덩어리마다 언어를 감지해 같은 언어가 이어지는 구간끼리 그 언어로 받아씀.
         # 영상 전체를 한 언어로 고정하면 한국어 내레이션 + 일본어 대화처럼 섞인 영상에서 다른 언어 부분이
@@ -183,7 +288,7 @@ class WhisperEngine:
             runs = self.language_runs(pcm, chunks, seen, prev)
             prev = runs[-1][0]
             for lg, r0, r1 in runs:
-                yield from self.transcribe_as(pcm, r0, r1, lg)
+                yield from self.transcribe_pieces(pcm, r0, r1, lg)
             pos = max(pos + 1, chunks[-1][1])  # 문장이 창 경계에서 잘리지 않게 마지막 덩어리 끝에서 이어감
 
     def language_runs(self, pcm, chunks, seen, prev):
@@ -207,13 +312,25 @@ class WhisperEngine:
                 runs[-1][2] = c1
             else:
                 runs.append([lg, c0, c1])
-        return runs
+        # 같은 언어 사이에 낀 짧은 다른 언어 구간(1.5초 미만)은 감지 실수로 보고 양옆 언어로 합침
+        # (예: 일본어 대사 사이 0.2초를 한국어로 감지해 "이마" 같은 엉뚱한 줄이 생김)
+        merged = []
+        for i, r in enumerate(runs):
+            nxt = runs[i + 1] if i + 1 < len(runs) else None
+            if merged and nxt and r[2] - r[1] < 1.5 and merged[-1][0] == nxt[0] != r[0]:
+                r = [merged[-1][0], r[1], r[2]]
+            if merged and merged[-1][0] == r[0]:
+                merged[-1][2] = r[2]
+            else:
+                merged.append(list(r))
+        return merged
 
-    def transcribe_as(self, pcm, a, b, lang):
+    def transcribe_as(self, pcm, a, b, lang, use_prompt=True):
         """[a,b) 를 lang 으로 받아씀. 자막마다 그 언어를 "l" 로 붙임 (확장 프로그램이 줄마다 번역할지 정할 때 씀)"""
         model = self.load()
         forced_cpu = False
         a, b = float(a), float(b)  # numpy 실수면 결과 시각도 numpy 가 되어 JSON 으로 못 내보냄
+        prompt = PROMPTS.get(lang) if use_prompt else None
         while True:
             try:
                 segments, info = model.transcribe(
@@ -224,12 +341,17 @@ class WhisperEngine:
                     condition_on_previous_text=False,
                     beam_size=5,
                     language=lang,
-                    initial_prompt=PROMPTS.get(lang),
+                    initial_prompt=prompt,
                 )
                 for seg in segments:
+                    if prompt and prompt_leaked(seg.text, prompt):
+                        # 배경음악 등으로 말이 잘 안 들리면 시작 문장을 그대로 받아쓰고 실제 대사는 놓침
+                        # (예: "日本語の書き起こし"). 그 부분만 시작 문장 없이 다시 받아씀
+                        yield from self.transcribe_as(pcm, max(a, seg.start - 0.3), min(b, seg.end + 0.3), lang, use_prompt=False)
+                        continue
                     # Whisper 는 구간 끝을 넘어 받아쓰기도 함. 넘친 줄은 버림 (언어별로 나눈 구간에서 다음 구간의
                     # 다른 언어 말을 이 언어로 잘못 받아쓴 것이라, 다음 구간이 제 언어로 다시 받아씀)
-                    cues = [c for c in words_to_cues(seg.words or []) if c["s"] < b - 0.2]
+                    cues = [c for c in words_to_cues(seg.words or []) if c["s"] < b - 0.2 and not is_hallucination(c)]
                     for c in cues:
                         c["l"] = lang
                     yield cues, min(seg.end, b), info.language, self.name
@@ -251,6 +373,32 @@ def speech_segments(pcm, a, b, max_sec=15.0, silence_ms=300, pad_ms=150):
     # threshold 를 기본(0.5)보다 낮춤: 배경음악이 깔린 짧은 대사를 놓치지 않도록
     opts = VadOptions(threshold=0.35, min_silence_duration_ms=silence_ms, speech_pad_ms=pad_ms, max_speech_duration_s=max_sec)
     return [[float(a + t["start"] / SR), float(a + t["end"] / SR)] for t in get_speech_timestamps(seg, opts)]
+
+
+def group_segments(segs, max_sec):
+    """이어지는 말소리 구간들을 길이 max_sec 이하 묶음 (시작, 끝) 으로 (쉼이 길어도 합쳐 앞뒤 문맥을 살림)"""
+    groups = []
+    for s0, s1 in segs:
+        if groups and s1 - groups[-1][0] <= max_sec:
+            groups[-1][1] = s1
+        else:
+            groups.append([s0, s1])
+    return groups
+
+
+def uncovered(seg, cues):
+    """말소리 구간 seg 중 어떤 자막에도 걸치지 않은 부분들 (단어 시각이 조금 어긋나는 것은 0.2초 여유로 봐줌)"""
+    parts = [list(seg)]
+    for c in cues:
+        c0, c1 = c["s"] - 0.2, c["e"] + 0.2
+        parts = [q for p in parts for q in ([p[0], min(p[1], c0)], [max(p[0], c1), p[1]]) if q[1] > q[0]]
+    return parts
+
+
+def repeats(cue, cues):
+    """다시 받아쓴 줄이 이미 있는 줄과 같은 말인지 (단어 시각이 어긋나 빈 곳으로 보였던 경우)"""
+    t = _norm(cue["o"])
+    return not t or any(t in _norm(c["o"]) for c in cues if abs(c["s"] - cue["s"]) < 8)
 
 
 def speech_chunks(pcm, a, b, max_sec):

@@ -64,7 +64,11 @@ const STYLES = {
 };
 const styleOf = (s) => (Object.hasOwn(STYLES, s) ? s : 'natural');
 
-function buildPrompt({ title, channel, lines, context, sourceLang, targetLang, style }) {
+// 원문이 받아쓰기(유튜브 자동 생성 자막·음성 인식)일 때 붙이는 규칙. 비슷한 소리로 잘못 받아쓴 말이 섞여 있음
+// (예: 일본어 "ベジータ兄さん(니상)" 을 숫자 "ベジータ23(니·산)" 으로 받아씀)
+const ASR_RULE = '- 원문은 소리를 자동으로 받아쓴 것이라 비슷한 소리의 다른 말로 잘못 받아쓴 부분이 있을 수 있습니다 (숫자·동음이의어·고유명사 등). 문맥상 어색하면 원래 했을 말을 추측해 바로잡아 번역합니다 (예: 일본어 "ベジータ23" 은 "ベジータ兄さん" 을 잘못 받아쓴 것이므로 "베지터 형님").\n';
+
+function buildPrompt({ title, channel, lines, context, sourceLang, targetLang, style, asr }) {
   const input = lines.map((l) => ({ i: l.i, t: l.t }));
   const target = LANG_RE.test(targetLang || '') ? targetLang : 'ko';
   const tName = langName(target);
@@ -74,7 +78,7 @@ function buildPrompt({ title, channel, lines, context, sourceLang, targetLang, s
 
 규칙:
 - 직역하지 말고, ${tName} 원어민이 실제로 말하는 것처럼 자연스럽게 의역합니다.
-${styleRule ? `- 말투: ${styleRule} 내용과 의미는 그대로 두고 말투만 바꿉니다. 원문이 이미 ${tName}이어도 그대로 옮기지 말고 이 말투로 바꿔 다시 씁니다.\n` : ''}- 각 줄은 자막 한 줄이므로 짧고 읽기 쉽게 유지합니다. 한 줄이 문장 중간에서 끊겨 있어도 앞뒤 줄의 문맥을 보고 자연스럽게 이어지게 번역합니다.
+${asr === true ? ASR_RULE : ''}${styleRule ? `- 말투: ${styleRule} 내용과 의미는 그대로 두고 말투만 바꿉니다. 원문이 이미 ${tName}이어도 그대로 옮기지 말고 이 말투로 바꿔 다시 씁니다.\n` : ''}- 각 줄은 자막 한 줄이므로 짧고 읽기 쉽게 유지합니다. 한 줄이 문장 중간에서 끊겨 있어도 앞뒤 줄의 문맥을 보고 자연스럽게 이어지게 번역합니다.
 - 고유명사, 브랜드, 기술 용어는 ${tName} 사용자들 사이에서 통용되는 표기를 쓰고, 통용 표기가 없으면 원문을 그대로 둡니다.
 - 입력 줄 수와 출력 줄 수는 반드시 같아야 하며, 각 i 값을 그대로 유지합니다.
 - 설명, 코드블록, 머리말 없이 JSON 배열만 출력합니다. 형식: [{"i":0,"t":"번역문"}, ...]

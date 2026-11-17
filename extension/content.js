@@ -304,7 +304,7 @@
     const s = {
       videoId, source, target, translator: settings.translator || 'codex', style, restyle: style !== 'natural', carry,
       cues: [], keys: new Set(), tcache: {}, running: 0, timers: [], dead: false,
-      title: '', channel: '', lastTime: 0, mode: 'captions', srcKey: '', srcLang: '',
+      title: '', channel: '', lastTime: 0, mode: 'captions', srcKey: '', srcLang: '', asr: false, // asr: 원문이 받아쓰기(자동 생성 자막·음성 인식)
       sttLang: '', sttEngine: settings.sttEngine || 'whisper', sttSince: 0, sttDone: false, sttMsg: '', sttState: '', sttProg: null, sttPolling: false, lastSeekStart: 0,
       fatal: '', hostErr: '', blockedUntil: 0,
       stats: { sent: 0, lastErr: '' },
@@ -363,6 +363,7 @@
         return showStatus('이 영상에는 자막이 없습니다 (음성 인식이 꺼져 있음)', true);
       }
       s.mode = 'stt';
+      s.asr = true;
       s.sttLang = source !== 'auto' ? baseLang(source) : ''; // '' = Whisper 자동 감지
       s.info.engine = s.sttEngine;
       if (!(await useSource(s, `stt-${s.sttEngine}-${s.sttLang || 'auto'}`, s.sttLang))) return;
@@ -380,6 +381,7 @@
       pollStt(s);
     } else {
       capInfo('active');
+      s.asr = cap.kind === 'asr';
       if (!(await useSource(s, `${cap.lang}${cap.kind ? '.' + cap.kind : ''}`, cap.lang))) return;
       addCues(s, ytEventsToCues(cap.events));
       if (!s.cues.length) return showStatus('자막이 비어 있습니다', true);
@@ -542,7 +544,7 @@
     // 원문 언어는 묶음의 줄들이 모두 같은 언어일 때만 알려줌 (섞여 있으면 번역 모델이 줄마다 판단)
     const langs = new Set(batch.map((c) => baseLang(lineLang(s, c))));
     const sourceLang = langs.size === 1 ? [...langs][0] : '';
-    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang, targetLang: s.target, translator: s.translator, style: s.style, urgent } });
+    const res = await send({ type: 'translate', body: { title: s.title, channel: s.channel, lines, context, sourceLang, targetLang: s.target, translator: s.translator, style: s.style, asr: s.asr, urgent } });
     s.running--;
     if (s.dead || s !== st) return;
     if (res.ok) {
